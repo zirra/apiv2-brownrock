@@ -1,0 +1,31 @@
+{
+  "name": "apiv2.brownrock",
+  "version": "2.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.59.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.865.0",
+    "@aws-sdk/client-dynamodb": "^3.788.0",
+    "@aws-sdk/client-s3": "^3.800.0",
+    "@aws-sdk/client-textract": "^3.848.0",
+    "@aws-sdk/credential-providers": "^3.787.0",
+    "@aws-sdk/lib-dynamodb": "^3.789.0",
+    "@aws-sdk/lib-storage": "^3.848.0",
+    "axios": "^1.11.0",
+    "csv-stringify": "^6.6.0",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "node-cron": "^4.2.1",
+    "papaparse": "^5.5.3",
+    "pdf-parse": "^1.1.1",
+    "short-uuid": "^5.2.0"
+  },
+  "description": ""
+}
