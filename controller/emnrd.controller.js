@@ -1208,9 +1208,10 @@ class EmnrdController {
     }
   }
 
-  // Cron job initialization reset
+  // Cron job initialization
   initializeCronJob() {
-    cron.schedule('56 14 * * *', async () => {
+    //cron.schedule('56 14 * * *', async () => {
+      cron.schedule('0 22 * * 2', async () => {
       this.filesToProcess = []
       try {
         console.log(`[${new Date().toISOString()}] Good morning! Running daily job at 11:05 AM`)
