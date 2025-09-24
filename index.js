@@ -57,14 +57,16 @@ app.get('/v1/health', (req,res) => {
 // Debug route to show all registered routes
 app.get('/v1/routes', (_req, res) => {
   const routes = []
-  app._router.stack.forEach((middleware) => {
-    if (middleware.route) {
-      routes.push({
-        path: middleware.route.path,
-        methods: Object.keys(middleware.route.methods)
-      })
-    }
-  })
+  if (app._router && app._router.stack) {
+    app._router.stack.forEach((middleware) => {
+      if (middleware.route) {
+        routes.push({
+          path: middleware.route.path,
+          methods: Object.keys(middleware.route.methods)
+        })
+      }
+    })
+  }
   res.json({ routes })
 })
 

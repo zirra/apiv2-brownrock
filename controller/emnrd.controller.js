@@ -1412,7 +1412,7 @@ class EmnrdController {
 
   // Cron job initialization
   initializeCronJob() {
-      cron.schedule('35 14 * * *', async () => {
+      cron.schedule('12 21 * * *', async () => {
       //cron.schedule('59 23 * * 2', async () => {
       this.filesToProcess = []
       try {
