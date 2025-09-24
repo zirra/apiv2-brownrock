@@ -3,6 +3,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const pdf = require('pdf-parse');
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 const TableName = process.env.DYNAMO_TABLE
 const DynamoClient = require('../config/dynamoclient.cjs')
 require('dotenv').config()
@@ -31,11 +32,23 @@ class ClaudeContactExtractor {
 
     this.config = config
     this.logger = console
+    this.textractClient = null
+
+    // Configuration from environment
+    this.processingConfig = {
+      processLocally: process.env.PROCESS_LOCALLY === 'true',
+      useGhostscript: process.env.USE_GHOSTSCRIPT === 'true',
+      useTextract: process.env.USE_TEXTRACT === 'true',
+      gsQuality: process.env.GS_QUALITY || 'ebook',
+      maxFileSize: parseInt(process.env.MAX_FILE_SIZE) || 500000,
+      keepLocalFiles: process.env.KEEP_LOCAL_FILES === 'true',
+      localPdfPath: process.env.LOCAL_PDF_PATH || './downloads/pdfs'
+    }
   }
 
   
   /**
-   * Extract text content from PDF buffer
+   * Extract text content from PDF buffer (basic method)
    */
   async extractTextFromPDF(pdfBuffer) {
     try {
@@ -44,6 +57,324 @@ class ClaudeContactExtractor {
     } catch (error) {
       this.logger.error('Error extracting text from PDF:', error.message);
       return '';
+    }
+  }
+
+  /**
+   * Optimize PDF with Ghostscript for better OCR results
+   */
+  async optimizePdfWithGhostscript(inputPath, outputPath = null) {
+    try {
+      const output = outputPath || inputPath.replace('.pdf', '_optimized.pdf')
+
+      const gsCommand = [
+        'gs',
+        '-sDEVICE=pdfwrite',
+        `-dPDFSETTINGS=/${this.processingConfig.gsQuality}`,
+        '-dNOPAUSE',
+        '-dQUIET',
+        '-dBATCH',
+        '-dColorImageResolution=150',
+        '-dGrayImageResolution=150',
+        '-dMonoImageResolution=300',
+        `-sOutputFile=${output}`,
+        inputPath
+      ].join(' ')
+
+      this.logger.info(`🖨️ Optimizing PDF with Ghostscript: ${path.basename(inputPath)}`)
+      execSync(gsCommand, { stdio: 'pipe' })
+
+      const originalStats = fs.statSync(inputPath)
+      const optimizedStats = fs.statSync(output)
+
+      if (optimizedStats.size < originalStats.size * 0.9) {
+        this.logger.info(`✅ Optimization successful: ${Math.round((1 - optimizedStats.size/originalStats.size) * 100)}% size reduction`)
+
+        if (!outputPath) {
+          fs.renameSync(output, inputPath)
+          return { optimizedPath: inputPath, wasOptimized: true, originalSize: originalStats.size, newSize: optimizedStats.size }
+        }
+        return { optimizedPath: output, wasOptimized: true, originalSize: originalStats.size, newSize: optimizedStats.size }
+      } else {
+        this.logger.info(`⚠️ Optimization didn't reduce size, keeping original`)
+        if (!outputPath) {
+          fs.unlinkSync(output)
+        }
+        return { optimizedPath: inputPath, wasOptimized: false, originalSize: originalStats.size, newSize: originalStats.size }
+      }
+
+    } catch (error) {
+      this.logger.warn(`⚠️ Ghostscript optimization failed: ${error.message}`)
+      return { optimizedPath: inputPath, wasOptimized: false, error: error.message }
+    }
+  }
+
+  /**
+   * Extract text using AWS Textract for image-based PDFs
+   */
+  async extractTextWithTextract(pdfPath, s3Key) {
+    try {
+      if (!this.textractClient) {
+        const { TextractClient } = require('@aws-sdk/client-textract')
+        this.textractClient = new TextractClient({
+          region: this.config.awsRegion || 'us-east-1',
+          credentials: {
+            accessKeyId: this.config.awsAccessKeyId,
+            secretAccessKey: this.config.awsSecretAccessKey
+          }
+        })
+      }
+
+      const { AnalyzeDocumentCommand } = require('@aws-sdk/client-textract')
+
+      this.logger.info(`🔍 Starting Textract analysis for ${path.basename(pdfPath)}`)
+
+      // Upload to S3 for Textract
+      await this.uploadFileToS3(pdfPath, s3Key)
+
+      const command = new AnalyzeDocumentCommand({
+        Document: {
+          S3Object: {
+            Bucket: process.env.S3_BUCKET_NAME,
+            Name: s3Key
+          }
+        },
+        FeatureTypes: ['TABLES', 'FORMS', 'LAYOUT']
+      })
+
+      const response = await this.textractClient.send(command)
+
+      let extractedText = ''
+      let tables = []
+      let forms = []
+
+      for (const block of response.Blocks) {
+        if (block.BlockType === 'LINE') {
+          extractedText += block.Text + '\n'
+        } else if (block.BlockType === 'TABLE') {
+          tables.push({ id: block.Id, confidence: block.Confidence })
+        } else if (block.BlockType === 'KEY_VALUE_SET') {
+          forms.push({ id: block.Id, confidence: block.Confidence })
+        }
+      }
+
+      this.logger.info(`📝 Textract extracted ${extractedText.length} characters, ${tables.length} tables, ${forms.length} forms`)
+
+      return {
+        extractedText,
+        textLength: extractedText.length,
+        tables,
+        forms,
+        confidence: 'high',
+        method: 'textract',
+        uploadedToS3: true
+      }
+
+    } catch (error) {
+      this.logger.warn(`⚠️ Textract failed: ${error.message}`)
+      return {
+        extractedText: '',
+        textLength: 0,
+        confidence: 'failed',
+        error: error.message,
+        method: 'textract',
+        uploadedToS3: false
+      }
+    }
+  }
+
+  /**
+   * Upload local file to S3
+   */
+  async uploadFileToS3(filePath, s3Key) {
+    try {
+      const fileBuffer = fs.readFileSync(filePath)
+
+      const command = new PutObjectCommand({
+        Bucket: process.env.S3_BUCKET_NAME,
+        Key: s3Key,
+        Body: fileBuffer,
+        ContentType: 'application/pdf',
+        ServerSideEncryption: 'AES256'
+      })
+
+      await this.s3Client.send(command)
+      return true
+    } catch (error) {
+      this.logger.error(`Error uploading ${filePath} to S3:`, error.message)
+      return false
+    }
+  }
+
+  /**
+   * Analyze PDF content to determine best processing approach
+   */
+  async analyzePdfContent(pdfPath) {
+    try {
+      const pdfParse = require('pdf-parse')
+      const dataBuffer = fs.readFileSync(pdfPath)
+      const data = await pdfParse(dataBuffer)
+
+      const textLength = data.text.trim().length
+      const numPages = data.numpages
+      const avgTextPerPage = textLength / numPages
+      const fileSizeBytes = fs.statSync(pdfPath).size
+      const fileSizeKB = fileSizeBytes / 1024
+      const textDensity = (textLength / fileSizeBytes) * 1000 // text chars per KB
+
+      let type, recommendation
+
+      if (textDensity > 50 && avgTextPerPage > 200) {
+        type = 'text-based'
+        recommendation = 'ghostscript-only'
+      } else if (textDensity < 10 || avgTextPerPage < 50) {
+        type = 'image-based'
+        recommendation = 'textract'
+      } else {
+        type = 'mixed'
+        recommendation = 'both'
+      }
+
+      return {
+        type,
+        recommendation,
+        hasImages: type !== 'text-based',
+        textLength,
+        numPages,
+        avgTextPerPage: Math.round(avgTextPerPage),
+        fileSizeKB: Math.round(fileSizeKB),
+        textDensity: Math.round(textDensity)
+      }
+
+    } catch (error) {
+      this.logger.warn(`⚠️ PDF content analysis failed: ${error.message}`)
+      return {
+        type: 'unknown',
+        recommendation: 'both',
+        hasImages: true,
+        textLength: 0,
+        numPages: 0,
+        avgTextPerPage: 0,
+        fileSizeKB: 0,
+        textDensity: 0,
+        error: error.message
+      }
+    }
+  }
+
+  /**
+   * Smart text extraction using optimized pipeline
+   */
+  async extractTextOptimized(pdfBuffer, pdfKey) {
+    try {
+      // Save buffer to temporary file for processing
+      const tempDir = this.processingConfig.localPdfPath || './temp'
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true })
+      }
+
+      let tempFile = path.join(tempDir, `temp_${Date.now()}.pdf`)
+      fs.writeFileSync(tempFile, pdfBuffer)
+
+      // Analyze content type
+      const contentAnalysis = await this.analyzePdfContent(tempFile)
+      this.logger.info(`📊 Content Analysis: ${contentAnalysis.type} (${contentAnalysis.textDensity}% density)`)
+
+      let extractedText = ''
+      let method = 'none'
+
+      if (contentAnalysis.type === 'text-based' || contentAnalysis.recommendation === 'ghostscript-only') {
+        // Text-based: Ghostscript + basic extraction
+        this.logger.info(`📝 Using text-based processing (Ghostscript + basic)`)
+
+        if (this.processingConfig.useGhostscript) {
+          const optimizationResult = await this.optimizePdfWithGhostscript(tempFile)
+          tempFile = optimizationResult.optimizedPath
+        }
+
+        const textResult = await this.extractTextFromPdf(tempFile)
+        extractedText = textResult.extractedText
+        method = 'ghostscript-basic'
+
+      } else if (contentAnalysis.type === 'image-based' || contentAnalysis.recommendation === 'textract') {
+        // Image-based: Textract OCR
+        this.logger.info(`📷 Using image-based processing (Textract OCR)`)
+
+        if (this.processingConfig.useTextract && pdfKey) {
+          const textractResult = await this.extractTextWithTextract(tempFile, pdfKey)
+          extractedText = textractResult.extractedText
+          method = 'textract-only'
+        } else {
+          // Fallback to basic extraction
+          const textResult = await this.extractTextFromPdf(tempFile)
+          extractedText = textResult.extractedText
+          method = 'basic-fallback'
+        }
+
+      } else {
+        // Mixed content: Ghostscript + Textract (best of both)
+        this.logger.info(`🔀 Using mixed processing (Ghostscript + Textract)`)
+
+        if (this.processingConfig.useGhostscript) {
+          const optimizationResult = await this.optimizePdfWithGhostscript(tempFile)
+          tempFile = optimizationResult.optimizedPath
+        }
+
+        const basicResult = await this.extractTextFromPdf(tempFile)
+
+        if (basicResult.textLength < 100 && this.processingConfig.useTextract && pdfKey) {
+          const textractResult = await this.extractTextWithTextract(tempFile, pdfKey)
+          if (textractResult.textLength > basicResult.textLength) {
+            extractedText = textractResult.extractedText
+            method = 'ghostscript-textract'
+          } else {
+            extractedText = basicResult.extractedText
+            method = 'ghostscript-basic'
+          }
+        } else {
+          extractedText = basicResult.extractedText
+          method = 'ghostscript-basic'
+        }
+      }
+
+      // Cleanup temp file unless configured to keep
+      if (!this.processingConfig.keepLocalFiles && fs.existsSync(tempFile)) {
+        fs.unlinkSync(tempFile)
+      }
+
+      this.logger.info(`✅ Extraction complete: ${extractedText.length} chars using ${method}`)
+
+      return extractedText
+
+    } catch (error) {
+      this.logger.error(`Error in optimized text extraction: ${error.message}`)
+      // Fallback to basic method
+      return await this.extractTextFromPDF(pdfBuffer)
+    }
+  }
+
+  /**
+   * Extract text from PDF file path (helper method)
+   */
+  async extractTextFromPdf(pdfPath) {
+    try {
+      const pdfParse = require('pdf-parse')
+      const dataBuffer = fs.readFileSync(pdfPath)
+      const data = await pdfParse(dataBuffer)
+
+      const meaningfulText = data.text.replace(/\s+/g, ' ').trim()
+
+      this.logger.info(`📝 Extracted ${meaningfulText.length} characters from PDF (${data.numpages} pages)`)
+      return {
+        extractedText: meaningfulText,
+        textLength: meaningfulText.length,
+        numPages: data.numpages,
+        isImageBased: meaningfulText.length < 50
+      }
+
+    } catch (error) {
+      this.logger.warn(`⚠️ PDF text extraction failed: ${error.message}`)
+      return { extractedText: '', textLength: 0, numPages: 0, isImageBased: true, error: error.message }
     }
   }
 
@@ -353,8 +684,8 @@ ${textContent.substring(0, 15000)}
   /**
    * Process a single PDF file
    */
-  async processSinglePDF(sourceBucket, pdfKey, file) {
-    this.logger.info(`Processing PDF: ${pdfKey}`);
+  async processSinglePDF(sourceBucket, pdfKey) {
+    this.logger.info(`🔍 Processing PDF with optimized pipeline: ${pdfKey}`);
 
     try {
       // Download PDF
@@ -363,24 +694,20 @@ ${textContent.substring(0, 15000)}
         return [];
       }
 
-      // Extract text
-      /* old
-      const textContent = await this.extractTextFromPDF(pdfBuffer);
-      if (!textContent.trim()) {
-        this.logger.warn(`No text content extracted from ${pdfKey}`);
-        return [];
-      }
-      */
+      // Use optimized text extraction (Ghostscript + Textract)
+      const textContent = await this.extractTextOptimized(pdfBuffer, pdfKey);
 
-      const textContent = await this.extractTextFromPDF(pdfBuffer);
       if (!textContent.trim()) {
-        this.logger.warn(`No text content extracted from ${pdfKey}`);
+        this.logger.warn(`❌ No text content extracted from ${pdfKey} using optimized pipeline`);
 
         // Move file to failed location
         await this.moveFileToFailedBucket(sourceBucket, pdfKey, this.config.failedBucket || sourceBucket, 'failed-pdfs/');
 
         return [];
       }
+
+      this.logger.info(`✅ Extracted ${textContent.length} chars from ${pdfKey}, sending to Claude...`);
+
       // Extract contacts using Claude
       const contacts = await this.extractContactInfoWithClaude(textContent);
 
@@ -449,7 +776,7 @@ ${textContent.substring(0, 15000)}
     // Generate output key if not provided
     if (!outputKey) {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      outputKey = `extracted_contacts_${pdfKey}_${timestamp}.csv`;
+      outputKey = `extracted_contacts_batch_${timestamp}.csv`;
     }
 
     // Convert to CSV
