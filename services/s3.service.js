@@ -1,5 +1,6 @@
 require('dotenv').config()
 const axios = require('axios')
+const fs = require('fs')
 const { Upload } = require('@aws-sdk/lib-storage')
 const {
   S3Client,
@@ -7,7 +8,8 @@ const {
   ListObjectsV2Command,
   GetObjectCommand,
   CopyObjectCommand,
-  DeleteObjectCommand 
+  DeleteObjectCommand,
+  PutObjectCommand
 } = require("@aws-sdk/client-s3")
 
 class S3Service {
@@ -85,6 +87,68 @@ class S3Service {
     }
   }
 
+  /**
+   * Upload local file to S3
+   */
+  async uploadFileToS3(filePath, s3Key) {
+    try {
+      console.log(`☁️ Uploading local file ${filePath} to S3 as ${s3Key}...`)
+
+      const fileBuffer = fs.readFileSync(filePath)
+
+      const command = new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: s3Key,
+        Body: fileBuffer,
+        ContentType: 'application/pdf',
+        ServerSideEncryption: 'AES256',
+        ACL: 'public-read'
+      })
+
+      await this.s3Client.send(command)
+      console.log(`✅ Successfully uploaded ${filePath} to s3://${this.bucketName}/${s3Key}`)
+      return true
+
+    } catch (error) {
+      console.error(`❌ Failed to upload ${filePath} to S3: ${error.message}`)
+      await this.loggingService.writeMessage('uploadFileError', error.message)
+      await this.authService.writeDynamoMessage({
+        pkey: 'uploadFileToS3#error',
+        skey: 'error',
+        origin: 'uploadFileToS3',
+        type: 'system',
+        data: error.message
+      })
+      throw error
+    }
+  }
+
+  /**
+   * Upload buffer to S3 (alternative method)
+   */
+  async uploadBufferToS3(buffer, s3Key) {
+    try {
+      console.log(`☁️ Uploading buffer to S3 as ${s3Key}...`)
+
+      const command = new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: s3Key,
+        Body: buffer,
+        ContentType: 'application/pdf',
+        ServerSideEncryption: 'AES256',
+        ACL: 'public-read'
+      })
+
+      await this.s3Client.send(command)
+      console.log(`✅ Successfully uploaded buffer to s3://${this.bucketName}/${s3Key}`)
+      return true
+
+    } catch (error) {
+      console.error(`❌ Failed to upload buffer to S3: ${error.message}`)
+      throw error
+    }
+  }
+
   async listFiles(folder = 'pdfs') {
     const prefix = folder.replace(/\/?$/, '/')
     const command = new ListObjectsV2Command({
@@ -154,27 +218,31 @@ class S3Service {
 
   async moveFileToProcessedBucket(sourceKey, targetBucket) {
     try {
-      const targetKey = sourceKey
-      
-      // Copy file to processed bucket
+      // If same bucket, move to processed/ folder, otherwise move to different bucket
+      const isSameBucket = targetBucket === this.bucketName
+      const targetKey = isSameBucket ? `processed/${sourceKey}` : sourceKey
+
+      // Copy file to processed location
       const copyCommand = new CopyObjectCommand({
         Bucket: targetBucket,
         Key: targetKey,
         CopySource: `${this.bucketName}/${sourceKey}`,
         ACL: 'public-read'
       })
-      
+
       await this.s3Client.send(copyCommand)
+
+      // Delete from source location (only if actually moved)
+      if (!isSameBucket || targetKey !== sourceKey) {
+        const deleteCommand = new DeleteObjectCommand({
+          Bucket: this.bucketName,
+          Key: sourceKey
+        })
+
+        await this.s3Client.send(deleteCommand)
+      }
       
-      // Delete from source bucket
-      const deleteCommand = new DeleteObjectCommand({
-        Bucket: this.bucketName,
-        Key: sourceKey
-      })
-      
-      await this.s3Client.send(deleteCommand)
-      
-      console.log(`🔄 Moved ${sourceKey} from ${this.bucketName} to ${targetBucket}`)
+      console.log(`🔄 Moved ${sourceKey} → ${targetKey} (${targetBucket})`)
       
     } catch (error) {
       console.error(`💥 Error moving file ${sourceKey}:`, error.message)

@@ -152,17 +152,29 @@ class PDFService {
         pdfKey
       );
 
-      if (contacts.length > 0 && outputBucket) {
-        // Optionally save to CSV
-        const csvContent = this.pdfContactService.convertToCSV(contacts);
-        const outputKey = `${target}_${Date.now()}.csv`;
-        
-        await this.pdfContactService.uploadCSVToS3(csvContent, outputBucket, outputKey);
-        
+      if (contacts.length > 0) {
+        let postgresResult = null;
+
+        // Try PostgreSQL first if configured
+        if (this.pdfContactService.processingConfig.usePostgres) {
+          console.log(`💾 Saving ${contacts.length} contacts to PostgreSQL...`);
+          postgresResult = await this.pdfContactService.saveContactsToPostgres(contacts);
+        }
+
+        // Fallback to CSV if requested or PostgreSQL failed
+        if (outputBucket && (!this.pdfContactService.processingConfig.usePostgres || !postgresResult?.success)) {
+          console.log(`📄 Saving ${contacts.length} contacts to CSV backup...`);
+          const csvContent = this.pdfContactService.convertToCSV(contacts);
+          const outputKey = `${target}_${Date.now()}.csv`;
+
+          await this.pdfContactService.uploadCSVToS3(csvContent, outputBucket, outputKey);
+        }
+
         return {
           success: true,
           contactCount: contacts.length,
-          contacts: contacts
+          contacts: contacts,
+          postgresResult: postgresResult
         };
       }
 

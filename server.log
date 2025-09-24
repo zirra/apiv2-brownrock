@@ -1,0 +1,8 @@
+Found file: emnrd.controller.js
+Found file: emnrd.controller.txt
+Found file: login.controller.js
+Server is running on port 5151
+Successfully loaded controller: emnrd.controller.js
+Successfully loaded controller: login.controller.js
+Sequelize connected to Postgres
+Database synced

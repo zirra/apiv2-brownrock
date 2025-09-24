@@ -21,7 +21,8 @@ const pgdbconnect = new Sequelize(
   }
 )
 
-const Contact = require('../models/contact.js')(pgdbconnect, DataTypes);
+const Contact = require('../models/contact.js');
+Contact.init(pgdbconnect);
 
 (async () => {
   try {

@@ -6,6 +6,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 const TableName = process.env.DYNAMO_TABLE
 const DynamoClient = require('../config/dynamoclient.cjs')
+const PostgresContactService = require('./postgres-contact.service.js')
 require('dotenv').config()
 
 const {
@@ -42,7 +43,13 @@ class ClaudeContactExtractor {
       gsQuality: process.env.GS_QUALITY || 'ebook',
       maxFileSize: parseInt(process.env.MAX_FILE_SIZE) || 500000,
       keepLocalFiles: process.env.KEEP_LOCAL_FILES === 'true',
-      localPdfPath: process.env.LOCAL_PDF_PATH || './downloads/pdfs'
+      localPdfPath: process.env.LOCAL_PDF_PATH || './downloads/pdfs',
+      usePostgres: process.env.USE_POSTGRES !== 'false' // Default to true
+    }
+
+    // Initialize PostgreSQL service
+    if (this.processingConfig.usePostgres) {
+      this.postgresService = new PostgresContactService()
     }
   }
 
@@ -195,13 +202,15 @@ class ClaudeContactExtractor {
         Key: s3Key,
         Body: fileBuffer,
         ContentType: 'application/pdf',
-        ServerSideEncryption: 'AES256'
+        ServerSideEncryption: 'AES256',
+        ACL: 'public-read'
       })
 
       await this.s3Client.send(command)
+      this.logger.info(`✅ Successfully uploaded ${filePath} to S3: ${s3Key}`)
       return true
     } catch (error) {
-      this.logger.error(`Error uploading ${filePath} to S3:`, error.message)
+      this.logger.error(`❌ Failed to upload ${filePath} to S3: ${error.message}`)
       return false
     }
   }
@@ -658,6 +667,42 @@ ${textContent.substring(0, 15000)}
     return csvRows.join('\n');
   }
 
+  /**
+   * Save contacts directly to PostgreSQL database
+   */
+  async saveContactsToPostgres(contacts) {
+    if (!this.postgresService) {
+      this.logger.warn('PostgreSQL service not initialized, skipping database save');
+      return { success: false, message: 'PostgreSQL not configured' };
+    }
+
+    if (!contacts || contacts.length === 0) {
+      return { success: true, insertedCount: 0, message: 'No contacts to save' };
+    }
+
+    try {
+      this.logger.info(`💾 Saving ${contacts.length} contacts directly to PostgreSQL...`);
+
+      const result = await this.postgresService.bulkInsertContacts(contacts);
+
+      if (result.success) {
+        this.logger.info(`✅ PostgreSQL save successful: ${result.insertedCount} contacts inserted`);
+      } else {
+        this.logger.error(`❌ PostgreSQL save failed: ${result.error}`);
+      }
+
+      return result;
+
+    } catch (error) {
+      this.logger.error(`❌ PostgreSQL save error: ${error.message}`);
+      return {
+        success: false,
+        error: error.message,
+        insertedCount: 0
+      };
+    }
+  }
+
   async moveFileToFailedBucket(sourceBucket, sourceKey, targetBucket, targetPrefix) {
     try {
       const destinationKey = path.join(targetPrefix, path.basename(sourceKey));
@@ -773,28 +818,53 @@ ${textContent.substring(0, 15000)}
       this.logger.warn('No contact information extracted from any PDFs');
       return { success: false, contactCount: 0 };
     }
-    // Generate output key if not provided
-    if (!outputKey) {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      outputKey = `extracted_contacts_batch_${timestamp}.csv`;
+
+    let success = false;
+    let outputLocation = null;
+    let postgresResult = null;
+
+    // Save to PostgreSQL if enabled
+    if (this.processingConfig.usePostgres) {
+      this.logger.info(`💾 Saving ${allContacts.length} contacts to PostgreSQL database...`);
+      postgresResult = await this.saveContactsToPostgres(allContacts);
+      success = postgresResult.success;
+      outputLocation = `postgres://contacts (${postgresResult.insertedCount} inserted)`;
     }
 
-    // Convert to CSV
-    const csvContent = this.convertToCSV(allContacts);
+    // Fallback to CSV/S3 if PostgreSQL disabled or failed
+    if (!this.processingConfig.usePostgres || !success) {
+      this.logger.info(`📄 Saving ${allContacts.length} contacts to CSV/S3...`);
 
-    // Upload to S3
-    const uploadSuccess = await this.uploadCSVToS3(csvContent, outputBucket, outputKey);
+      // Generate output key if not provided
+      if (!outputKey) {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        outputKey = `extracted_contacts_batch_${timestamp}.csv`;
+      }
 
-    if (uploadSuccess) {
-      this.logger.info(`Successfully processed ${pdfKeys.length} PDFs and extracted ${allContacts.length} contacts`);
-      this.logger.info(`Results saved to s3://${outputBucket}/${outputKey}`);
+      // Convert to CSV
+      const csvContent = this.convertToCSV(allContacts);
+
+      // Upload to S3
+      const uploadSuccess = await this.uploadCSVToS3(csvContent, outputBucket, outputKey);
+
+      if (uploadSuccess) {
+        success = true;
+        outputLocation = `s3://${outputBucket}/${outputKey}`;
+        this.logger.info(`📁 CSV backup saved to ${outputLocation}`);
+      }
+    }
+
+    if (success) {
+      this.logger.info(`✅ Successfully processed ${pdfKeys.length} PDFs and extracted ${allContacts.length} contacts`);
+      this.logger.info(`📊 Results saved to: ${outputLocation}`);
     }
 
     return {
-      success: uploadSuccess,
+      success: success,
       contactCount: allContacts.length,
-      outputLocation: `s3://${outputBucket}/${outputKey}`,
-      contacts: allContacts
+      outputLocation: outputLocation,
+      contacts: allContacts,
+      postgresResult: postgresResult
     };
   }
 
