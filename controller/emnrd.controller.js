@@ -1155,6 +1155,71 @@ class EmnrdController {
     }
   }
 
+  async getPostgresContacts(req, res) {
+    try {
+      // Check if service exists
+      if (!this.postgresContactService) {
+        return res.status(500).json({
+          success: false,
+          message: 'PostgresContactService not initialized'
+        })
+      }
+
+      const {
+        limit = 25,
+        offset = 0,
+        name,
+        company,
+        acknowledged,
+        islegal,
+        city,
+        state
+      } = req.query
+
+      const result = await this.postgresContactService.searchContacts({
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        name,
+        company,
+        acknowledged: acknowledged !== undefined ? acknowledged === 'true' : undefined,
+        islegal: islegal !== undefined ? islegal === 'true' : undefined,
+        city,
+        state
+      })
+
+      res.status(200).json(result)
+
+    } catch (error) {
+      console.error('Error fetching PostgreSQL contacts:', error.message)
+      res.status(500).json({
+        success: false,
+        message: `Error fetching contacts: ${error.message}`
+      })
+    }
+  }
+
+  async getPostgresContactStats(req, res) {
+    try {
+      // Check if service exists
+      if (!this.postgresContactService) {
+        return res.status(500).json({
+          success: false,
+          message: 'PostgresContactService not initialized'
+        })
+      }
+
+      const result = await this.postgresContactService.getContactStats()
+      res.status(200).json(result)
+
+    } catch (error) {
+      console.error('Error fetching PostgreSQL contact stats:', error.message)
+      res.status(500).json({
+        success: false,
+        message: `Error fetching stats: ${error.message}`
+      })
+    }
+  }
+
   async debugMethods(_req, res) {
     try {
       const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(this))
@@ -1525,10 +1590,14 @@ module.exports.controller = (app) => {
   app.post('/v1/extract-contacts', (req, res) => emnrdController.extractContacts(req, res))
   app.post('/v1/processsingle', (req, res) => emnrdController.processSingleFile(req, res))
 
-  // Contact management endpoints
+  // Contact management endpoints (DynamoDB)
   app.get('/v1/contacts', (req, res) => emnrdController.getContacts(req, res))
   app.get('/v1/contacts/stats', (req, res) => emnrdController.getContactStats(req, res))
   app.put('/v1/contacts/update', (req, res) => emnrdController.updateContactStatus(req, res))
+
+  // PostgreSQL contact management endpoints
+  app.get('/v1/postgres/contacts', (req, res) => emnrdController.getPostgresContacts(req, res))
+  app.get('/v1/postgres/contacts/stats', (req, res) => emnrdController.getPostgresContactStats(req, res))
   
   // Configuration and optimization endpoints
   app.get('/v1/config', (req, res) => emnrdController.getConfig(req, res))

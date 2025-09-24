@@ -36,9 +36,12 @@ const loadControllers = () => {
   
 }
 
-loadControllers()
-
+// Add routes first, then load controllers
 app.get('/health', (req,res) => {
+  res.send('OK')
+})
+
+app.get('/v1/health', (req,res) => {
   const formatMemoryUsage = (data) => `${Math.round(data / 1024 / 1024 * 100) / 100} MB`
   const memoryData = process.memoryUsage()
   const memoryUsage = {
@@ -50,6 +53,79 @@ app.get('/health', (req,res) => {
   }
   res.status(200).send(memoryUsage)
 })
+
+// Debug route to show all registered routes
+app.get('/v1/routes', (_req, res) => {
+  const routes = []
+  app._router.stack.forEach((middleware) => {
+    if (middleware.route) {
+      routes.push({
+        path: middleware.route.path,
+        methods: Object.keys(middleware.route.methods)
+      })
+    }
+  })
+  res.json({ routes })
+})
+
+// Direct test route for PostgreSQL (bypassing controller loading issues)
+app.get('/v1/test-postgres-direct', async (_req, res) => {
+  try {
+    console.log('🧪 Direct PostgreSQL test...')
+    const PostgresContactService = require('./services/postgres-contact.service.js')
+    const pgService = new PostgresContactService()
+    const result = await pgService.testConnection()
+    res.json(result)
+  } catch (error) {
+    console.error('Direct test error:', error)
+    res.status(500).json({
+      success: false,
+      message: error.message,
+      stack: error.stack
+    })
+  }
+})
+
+// Direct route for getting PostgreSQL contacts
+app.get('/v1/postgres-contacts-direct', async (req, res) => {
+  try {
+    const PostgresContactService = require('./services/postgres-contact.service.js')
+    const pgService = new PostgresContactService()
+
+    const {
+      limit = 25,
+      offset = 0,
+      name,
+      company,
+      acknowledged,
+      islegal,
+      city,
+      state
+    } = req.query
+
+    const result = await pgService.searchContacts({
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+      name,
+      company,
+      acknowledged: acknowledged !== undefined ? acknowledged === 'true' : undefined,
+      islegal: islegal !== undefined ? islegal === 'true' : undefined,
+      city,
+      state
+    })
+
+    res.json(result)
+  } catch (error) {
+    console.error('Direct contacts error:', error)
+    res.status(500).json({
+      success: false,
+      message: error.message
+    })
+  }
+})
+
+// Load controllers after defining base routes
+loadControllers()
 
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`)
