@@ -10,6 +10,7 @@ const S3Service = require('../services/s3.service.js')
 const LoggingService = require('../services/logging.service.js')
 const DataService = require('../services/data.service.js')
 const ContactService = require('../services/contact.service.js')
+const PostgresContactService = require('../services/postgres-contact.service.js')
 const PDFService = require('../services/pdf.service.js')
 
 class EmnrdController {
@@ -20,6 +21,7 @@ class EmnrdController {
     this.s3Service = new S3Service(this.authService, this.loggingService)
     this.dataService = new DataService(this.authService, this.loggingService)
     this.contactService = new ContactService(this.authService, this.s3Service)
+    this.postgresContactService = new PostgresContactService()
     this.pdfService = new PDFService(this.authService, this.s3Service, this.loggingService)
     
     // State
@@ -1177,6 +1179,117 @@ class EmnrdController {
     }
   }
 
+  // PostgreSQL CSV processing workflow
+  async processCSVsToPostgres() {
+    console.log('🐘 Starting CSV processing to PostgreSQL...')
+
+    try {
+      // List all CSV files in the claude-csv bucket/folder
+      const csvFiles = await this.s3Service.listFiles('claude-csv')
+
+      if (csvFiles.length === 0) {
+        console.log('📭 No CSV files found in claude-csv folder for PostgreSQL processing')
+        return { success: false, message: 'No CSV files found' }
+      }
+
+      let totalRecordsProcessed = 0
+      let filesProcessed = 0
+      const validCsvFiles = csvFiles.filter(item =>
+        item.Key.endsWith('.csv') && !item.Key.endsWith('/')
+      )
+
+      console.log(`📁 Found ${validCsvFiles.length} CSV files to process for PostgreSQL`)
+
+      for (const csvFile of validCsvFiles) {
+        try {
+          console.log(`🔄 Processing CSV for PostgreSQL: ${csvFile.Key}`)
+
+          // Download CSV content from S3
+          const csvContent = await this.s3Service.downloadCSVFromS3(csvFile.Key)
+
+          // Parse CSV and extract contact data
+          const contactsFromCsv = await this.parseCSVToContactFormat(csvContent, csvFile.Key)
+
+          // Insert contacts into PostgreSQL
+          const insertResult = await this.postgresContactService.bulkInsertContacts(contactsFromCsv)
+
+          if (insertResult.success) {
+            totalRecordsProcessed += insertResult.insertedCount
+            filesProcessed++
+            console.log(`✅ Processed ${insertResult.insertedCount} records from ${csvFile.Key} to PostgreSQL`)
+          } else {
+            console.error(`❌ Failed to insert contacts from ${csvFile.Key}: ${insertResult.error}`)
+          }
+
+        } catch (fileError) {
+          console.error(`❌ Error processing file ${csvFile.Key} for PostgreSQL: ${fileError.message}`)
+        }
+      }
+
+      const result = {
+        success: true,
+        filesProcessed,
+        totalRecordsProcessed,
+        message: `Successfully processed ${totalRecordsProcessed} records from ${filesProcessed} CSV files to PostgreSQL`
+      }
+
+      console.log(`✅ PostgreSQL CSV processing completed: ${result.message}`)
+      return result
+
+    } catch (error) {
+      console.error('💥 PostgreSQL CSV processing failed:', error.message)
+      return {
+        success: false,
+        message: `PostgreSQL CSV processing failed: ${error.message}`
+      }
+    }
+  }
+
+  async parseCSVToContactFormat(csvContent, fileName) {
+    try {
+      const Papa = require('papaparse')
+      const parseResult = Papa.parse(csvContent, {
+        header: true,
+        skipEmptyLines: true,
+        dynamicTyping: false,
+        transformHeader: (header) => header.trim()
+      })
+
+      if (parseResult.errors.length > 0) {
+        console.warn(`⚠️ CSV parsing warnings for ${fileName}:`, parseResult.errors)
+      }
+
+      const records = parseResult.data
+      console.log(`📋 Parsed ${records.length} records from ${fileName} for PostgreSQL`)
+
+      // Convert CSV records to Claude contact format expected by PostgresContactService
+      const contacts = records.filter(record => record && Object.keys(record).length > 0).map(record => {
+        // Safely combine first and last name
+        const firstName = (record.first_name || '').trim()
+        const lastName = (record.last_name || '').trim()
+        const fullName = [firstName, lastName].filter(Boolean).join(' ') || record.name || ''
+
+        return {
+          name: fullName,
+          company: record.company || record.llc_owner || '',
+          first_name: firstName,
+          last_name: lastName,
+          address: record.address || '',
+          phone: record.phone1 || record.phone || '',
+          fax: record.fax || '',
+          email: record.email1 || record.email || '',
+          notes: record.notes || ''
+        }
+      })
+
+      return contacts
+
+    } catch (error) {
+      console.error(`Error parsing CSV data from ${fileName} for PostgreSQL:`, error.message)
+      throw error
+    }
+  }
+
   // Main processing workflow
   async processFilesInBucket() {
     this.filesToProcess = []
@@ -1210,7 +1323,7 @@ class EmnrdController {
 
   // Cron job initialization
   initializeCronJob() {
-      cron.schedule('49 8 * * *', async () => {
+      cron.schedule('48 10 * * *', async () => {
       //cron.schedule('59 23 * * 2', async () => {
       this.filesToProcess = []
       try {
@@ -1267,41 +1380,78 @@ class EmnrdController {
             data: `SUCCESS: Claude Completed`
           })
 
-          console.log('-----------------------------------')
-          console.log('📊 Starting CSV processing to DynamoDB...')
+          // console.log('-----------------------------------')
+          // console.log('📊 Starting CSV processing to DynamoDB...')
 
-          await this.authService.writeDynamoMessage({ 
-            pkey: 'schedule#csvProcessing',
+          // await this.authService.writeDynamoMessage({
+          //   pkey: 'schedule#csvProcessing',
+          //   skey: 'schedule#start',
+          //   origin: 'csvProcessor',
+          //   type:'system',
+          //   data: `SUCCESS: CSV Processing Started`
+          // })
+
+          // const csvProcessingResult = await this.contactService.processCSVsToDynamo()
+
+          // if (csvProcessingResult.success) {
+          //   console.log('✅ CSV processing to DynamoDB completed successfully!')
+          //   console.log(`📊 Processed ${csvProcessingResult.totalRecordsProcessed} records from ${csvProcessingResult.filesProcessed} CSV files`)
+
+          //   await this.authService.writeDynamoMessage({
+          //     pkey: 'schedule#csvProcessing',
+          //     skey: 'schedule#complete',
+          //     origin: 'csvProcessor',
+          //     type:'system',
+          //     data: `SUCCESS: ${csvProcessingResult.message}`
+          //   })
+
+          console.log('-----------------------------------')
+          console.log('🐘 Starting PostgreSQL processing...')
+
+          await this.authService.writeDynamoMessage({
+            pkey: 'schedule#postgresProcessing',
             skey: 'schedule#start',
-            origin: 'csvProcessor', 
-            type:'system', 
-            data: `SUCCESS: CSV Processing Started`
+            origin: 'postgresProcessor',
+            type: 'system',
+            data: 'SUCCESS: PostgreSQL Processing Started'
           })
 
-          const csvProcessingResult = await this.contactService.processCSVsToDynamo()
+          const postgresProcessingResult = await this.processCSVsToPostgres()
 
-          if (csvProcessingResult.success) {
-            console.log('✅ CSV processing to DynamoDB completed successfully!')
-            console.log(`📊 Processed ${csvProcessingResult.totalRecordsProcessed} records from ${csvProcessingResult.filesProcessed} CSV files`)
-            
-            await this.authService.writeDynamoMessage({ 
-              pkey: 'schedule#csvProcessing',
+          if (postgresProcessingResult.success) {
+            console.log('✅ PostgreSQL processing completed successfully!')
+            console.log(`📊 Processed ${postgresProcessingResult.totalRecordsProcessed} records to PostgreSQL`)
+
+            await this.authService.writeDynamoMessage({
+              pkey: 'schedule#postgresProcessing',
               skey: 'schedule#complete',
-              origin: 'csvProcessor', 
-              type:'system', 
-              data: `SUCCESS: ${csvProcessingResult.message}`
+              origin: 'postgresProcessor',
+              type: 'system',
+              data: `SUCCESS: ${postgresProcessingResult.message}`
             })
           } else {
-            console.log('❌ CSV processing to DynamoDB failed:', csvProcessingResult.message)
-            
-            await this.authService.writeDynamoMessage({ 
-              pkey: 'schedule#csvProcessing',
+            console.log('❌ PostgreSQL processing failed:', postgresProcessingResult.message)
+
+            await this.authService.writeDynamoMessage({
+              pkey: 'schedule#postgresProcessing',
               skey: 'schedule#error',
-              origin: 'csvProcessor', 
-              type:'system', 
-              data: `FAILED: ${csvProcessingResult.message}`
+              origin: 'postgresProcessor',
+              type: 'system',
+              data: `FAILED: ${postgresProcessingResult.message}`
             })
           }
+
+          // } else {
+          //   console.log('❌ CSV processing to DynamoDB failed:', csvProcessingResult.message)
+
+          //   await this.authService.writeDynamoMessage({
+          //     pkey: 'schedule#csvProcessing',
+          //     skey: 'schedule#error',
+          //     origin: 'csvProcessor',
+          //     type:'system',
+          //     data: `FAILED: ${csvProcessingResult.message}`
+          //   })
+          // }
 
         } else {
           console.log('❌ Claude contact extraction failed:', contactExtractionResult.message)

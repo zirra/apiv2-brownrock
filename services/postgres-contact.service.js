@@ -88,13 +88,26 @@ class PostgresContactService {
    */
   isLegalEntity(contact) {
     const legalIndicators = [
-      'attorney', 'atty', 'lawyer', 'legal', 'law firm', 'law office',
-      'esquire', 'esq', 'j.d.', 'juris doctor', 'p.c.', 'p.a.', 'pllc',
-      'llp', 'counsel', 'legal representative', 'legal department'
+      'attorney', 'atty', 'lawyer', 'attorneys', 'law firm', 'law office',
+      'esquire', 'esq', 'j.d.', 'juris doctor', 'p.c.', 'p.a.',
+      'llp', 'pllc', 'counsel', 'counselor', 'legal representative',
+      'legal department', 'legal services', 'legal counsel',
+      'law group', 'law associates', 'legal aid', 'paralegal',
+      'bar association', 'legal clinic', 'advocate'
     ];
 
-    const text = (contact.name + ' ' + contact.company + ' ' + contact.notes).toLowerCase();
-    return legalIndicators.some(indicator => text.includes(indicator));
+    // Check name, company, and notes for legal indicators
+    const searchText = (
+      (contact.name || '') + ' ' +
+      (contact.company || '') + ' ' +
+      (contact.notes || '')
+    ).toLowerCase();
+
+    // Be more specific - require word boundaries to avoid false matches
+    return legalIndicators.some(indicator => {
+      const regex = new RegExp(`\\b${indicator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      return regex.test(searchText);
+    });
   }
 
   /**
@@ -104,11 +117,38 @@ class PostgresContactService {
     try {
       console.log(`📊 Converting ${claudeContacts.length} Claude contacts to PostgreSQL format...`);
 
-      const postgresContacts = claudeContacts.map(contact =>
-        this.mapClaudeToPostgres(contact)
-      );
+      const postgresContacts = claudeContacts.map(contact => {
+        const mapped = this.mapClaudeToPostgres(contact)
+        // Clean phone numbers and emails to prevent validation errors
+        Object.keys(mapped).forEach(key => {
+          if (key.startsWith('phone') && mapped[key]) {
+            // Clean phone: keep only allowed characters and truncate
+            const cleanedPhone = mapped[key].replace(/[^\d\s\-\(\)\+\.]/g, '').substring(0, 20).trim()
+            mapped[key] = cleanedPhone || null // Set to null if empty after cleaning
+          }
+          if (key.startsWith('email') && mapped[key]) {
+            // Clean email: basic validation and truncate
+            const email = mapped[key].trim().toLowerCase()
+            if (email.includes('@') && email.includes('.')) {
+              mapped[key] = email.substring(0, 255)
+            } else {
+              mapped[key] = null // Invalid email, set to null
+            }
+          }
+          if (key === 'name' && mapped[key]) {
+            mapped[key] = mapped[key].substring(0, 255) // Truncate to max length
+          }
+          if (key === 'llc_owner' && mapped[key]) {
+            mapped[key] = mapped[key].substring(0, 255) // Truncate to max length
+          }
+        })
+        return mapped
+      }).filter(contact => {
+        // Filter out contacts with no useful data
+        return contact.name || contact.llc_owner || contact.phone1 || contact.email1
+      });
 
-      console.log(`💾 Bulk inserting ${postgresContacts.length} contacts into PostgreSQL...`);
+      console.log(`💾 Bulk inserting ${postgresContacts.length} valid contacts into PostgreSQL...`);
 
       const result = await this.Contact.bulkCreate(postgresContacts, {
         ignoreDuplicates: true,
@@ -127,10 +167,20 @@ class PostgresContactService {
 
     } catch (error) {
       console.error(`❌ PostgreSQL bulk insert failed: ${error.message}`);
+      console.error('Full error details:', error);
+      if (error.errors && error.errors.length > 0) {
+        console.error('Validation errors:', error.errors.map(e => ({
+          message: e.message,
+          type: e.type,
+          path: e.path,
+          value: e.value
+        })));
+      }
       return {
         success: false,
         error: error.message,
-        insertedCount: 0
+        insertedCount: 0,
+        detailedError: error.errors || []
       };
     }
   }

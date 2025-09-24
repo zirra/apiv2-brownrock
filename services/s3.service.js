@@ -149,6 +149,60 @@ class S3Service {
     }
   }
 
+  /**
+   * Get object from S3
+   */
+  async getObject(key) {
+    try {
+      console.log(`📥 Getting object from S3: ${key}`)
+
+      const command = new GetObjectCommand({
+        Bucket: this.bucketName,
+        Key: key
+      })
+
+      const response = await this.s3Client.send(command)
+      console.log(`✅ Successfully retrieved ${key} from S3`)
+
+      return response
+
+    } catch (error) {
+      console.error(`❌ Failed to get ${key} from S3: ${error.message}`)
+      await this.loggingService.writeMessage('getObjectError', error.message)
+      await this.authService.writeDynamoMessage({
+        pkey: 'getObject#error',
+        skey: 'error',
+        origin: 'getObject',
+        type: 'system',
+        data: error.message
+      })
+      throw error
+    }
+  }
+
+  /**
+   * Delete object from S3
+   */
+  async deleteObject(key) {
+    try {
+      console.log(`🗑️ Deleting object from S3: ${key}`)
+
+      const command = new DeleteObjectCommand({
+        Bucket: this.bucketName,
+        Key: key
+      })
+
+      await this.s3Client.send(command)
+      console.log(`✅ Successfully deleted ${key} from S3`)
+
+      return true
+
+    } catch (error) {
+      console.error(`❌ Failed to delete ${key} from S3: ${error.message}`)
+      throw error
+    }
+  }
+
   async listFiles(folder = 'pdfs') {
     const prefix = folder.replace(/\/?$/, '/')
     const command = new ListObjectsV2Command({
