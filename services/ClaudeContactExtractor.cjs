@@ -569,7 +569,7 @@ If no contact information is found, return an empty array [].
 Only return the JSON array, no additional text or formatting.
 
 Text content to analyze:
-${textContent.substring(0, 15000)}
+${textContent.substring(0, 10000)}
         `.trim();
 
     try {
@@ -596,6 +596,34 @@ ${textContent.substring(0, 15000)}
 
     } catch (error) {
       this.logger.error('Error processing with Claude:', error.message);
+
+      // Handle rate limit errors specifically
+      if (error.status === 429) {
+        this.logger.warn('Rate limit exceeded, waiting 60 seconds before retrying...');
+        await new Promise(resolve => setTimeout(resolve, 60000)); // Wait 1 minute
+
+        // Optionally retry once
+        try {
+          const retryResponse = await this.anthropic.messages.create({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 4000,
+            messages: [{
+              role: "user",
+              content: prompt
+            }]
+          });
+
+          const responseText = retryResponse.content[0].text;
+          const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const contacts = JSON.parse(jsonMatch[0]);
+            return Array.isArray(contacts) ? contacts : [];
+          }
+        } catch (retryError) {
+          this.logger.error('Retry also failed:', retryError.message);
+        }
+      }
+
       return [];
     }
   }
@@ -805,7 +833,7 @@ ${textContent.substring(0, 15000)}
     const allContacts = [];
 
     // Process PDFs in batches to avoid overwhelming the API
-    const batchSize = 3;
+    const batchSize = 1; // Reduced to avoid rate limits
     for (let i = 0; i < pdfKeys.length; i += batchSize) {
       const batch = pdfKeys.slice(i, i + batchSize);
 
@@ -823,9 +851,9 @@ ${textContent.substring(0, 15000)}
         }
       });
 
-      // Add small delay between batches to respect rate limits
+      // Add delay between batches to respect rate limits
       if (i + batchSize < pdfKeys.length) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 3000)); // Increased to 3 seconds
       }
     }
 

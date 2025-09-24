@@ -6,3 +6,20 @@ Successfully loaded controller: emnrd.controller.js
 Successfully loaded controller: login.controller.js
 Sequelize connected to Postgres
 Database synced
+🔍 Current Configuration Debug:
+- LOCAL_PDF_PATH env: ./downloads/pdfs
+- USE_GHOSTSCRIPT env: true
+- PROCESS_LOCALLY env: true
+- MAX_FILE_SIZE env: 500000
+- SMART_PROCESSING env: true
+- Config object: {
+  "localDownloadPath": "./downloads/pdfs",
+  "useGhostscript": true,
+  "ghostscriptQuality": "ebook",
+  "maxFileSize": 500000,
+  "processLocally": true,
+  "useTextract": false,
+  "extractText": true,
+  "textExtractionMethod": "smart",
+  "smartProcessing": true
+}

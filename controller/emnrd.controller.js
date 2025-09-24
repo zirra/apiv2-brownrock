@@ -1131,7 +1131,31 @@ class EmnrdController {
     }
   }
 
-  async debugMethods(req, res) {
+  async testPostgres(_req, res) {
+    try {
+      console.log('🧪 Testing PostgreSQL connection and model...')
+
+      // Check if service exists
+      if (!this.postgresContactService) {
+        return res.status(500).json({
+          success: false,
+          message: 'PostgresContactService not initialized'
+        })
+      }
+
+      const result = await this.postgresContactService.testConnection()
+      res.status(200).json(result)
+    } catch (error) {
+      console.error('❌ testPostgres error:', error)
+      res.status(500).json({
+        success: false,
+        message: error.message,
+        stack: error.stack
+      })
+    }
+  }
+
+  async debugMethods(_req, res) {
     try {
       const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(this))
       res.status(200).json({
@@ -1146,7 +1170,7 @@ class EmnrdController {
     }
   }
 
-  async debugConfig(req, res) {
+  async debugConfig(_req, res) {
     try {
       console.log('🔍 Current Configuration Debug:')
       console.log('- LOCAL_PDF_PATH env:', process.env.LOCAL_PDF_PATH)
@@ -1323,7 +1347,7 @@ class EmnrdController {
 
   // Cron job initialization
   initializeCronJob() {
-      cron.schedule('48 10 * * *', async () => {
+      cron.schedule('35 14 * * *', async () => {
       //cron.schedule('59 23 * * 2', async () => {
       this.filesToProcess = []
       try {
@@ -1491,6 +1515,7 @@ const emnrdController = new EmnrdController()
 // Export both the Controller class and controller function for routes
 module.exports.Controller = { EmnrdController: emnrdController }
 module.exports.controller = (app) => {
+  console.log('🔧 Loading EMNRD controller routes...')
   // PDF and file management
   app.get('/v1/pdflist', (req, res) => emnrdController.getPdfList(req, res))
   app.get('/v1/pdfbykey', (req, res) => emnrdController.getByKey(req, res))
@@ -1517,4 +1542,17 @@ module.exports.controller = (app) => {
   app.get('/v1/debug-methods', (req, res) => emnrdController.debugMethods(req, res))
   app.get('/v1/debug-config', (req, res) => emnrdController.debugConfig(req, res))
   app.get('/v1/test-contacts', (req, res) => emnrdController.testContacts(req, res))
+  app.get('/v1/test-postgres', (req, res) => emnrdController.testPostgres(req, res))
+
+  // Simple postgres status check
+  app.get('/v1/postgres-status', (_req, res) => {
+    res.json({
+      postgresServiceExists: !!emnrdController.postgresContactService,
+      serviceMethods: emnrdController.postgresContactService ?
+        Object.getOwnPropertyNames(Object.getPrototypeOf(emnrdController.postgresContactService)) : [],
+      timestamp: new Date().toISOString()
+    })
+  })
+
+  console.log('✅ EMNRD controller routes loaded successfully')
 }

@@ -21,11 +21,31 @@ class PostgresContactService {
     const emails = [];
     if (claudeContact.email) emails.push(claudeContact.email);
 
+    // Handle name splitting - prioritize existing first_name/last_name, then split full name
+    let firstName = claudeContact.first_name || '';
+    let lastName = claudeContact.last_name || '';
+    let fullName = claudeContact.name || '';
+
+    // If we have first_name and last_name but no full name, construct it
+    if (firstName && lastName && !fullName) {
+      fullName = `${firstName} ${lastName}`.trim();
+    }
+    // If we have full name but no first/last name, try to split it
+    else if (fullName && !firstName && !lastName) {
+      const nameParts = this.splitFullName(fullName);
+      firstName = nameParts.firstName;
+      lastName = nameParts.lastName;
+    }
+    // If we have both, use existing values (don't override)
+
+    // Final name to store (prefer full name, fall back to constructed name)
+    const finalName = fullName || `${firstName} ${lastName}`.trim() || claudeContact.company || null;
+
     // Parse address components
     const { street, city, state, zip, unit } = this.parseAddress(claudeContact.address || '');
 
     return {
-      name: claudeContact.name || claudeContact.company || null,
+      name: finalName,
       llc_owner: claudeContact.company || null,
       phone1: phones[0] || null,
       phone2: phones[1] || null,
@@ -45,6 +65,35 @@ class PostgresContactService {
       acknowledged: false,
       islegal: this.isLegalEntity(claudeContact)
     };
+  }
+
+  /**
+   * Split full name into first and last name components
+   */
+  splitFullName(fullName) {
+    if (!fullName || typeof fullName !== 'string') {
+      return { firstName: '', lastName: '' };
+    }
+
+    // Clean and split the name
+    const nameParts = fullName.trim().split(/\s+/).filter(Boolean);
+
+    if (nameParts.length === 0) {
+      return { firstName: '', lastName: '' };
+    } else if (nameParts.length === 1) {
+      // Single name - could be first or last, default to first
+      return { firstName: nameParts[0], lastName: '' };
+    } else if (nameParts.length === 2) {
+      // Simple case: First Last
+      return { firstName: nameParts[0], lastName: nameParts[1] };
+    } else {
+      // Multiple parts - first name is first part, last name is last part
+      // Middle names/initials go with first name
+      return {
+        firstName: nameParts.slice(0, -1).join(' '),
+        lastName: nameParts[nameParts.length - 1]
+      };
+    }
   }
 
   /**
@@ -111,6 +160,34 @@ class PostgresContactService {
   }
 
   /**
+   * Remove duplicate contacts based on name/company and contact info
+   */
+  removeDuplicates(contacts) {
+    const seen = new Map();
+    const unique = [];
+
+    for (const contact of contacts) {
+      // Create a key based on name/company and primary contact info
+      const nameKey = (contact.name || '').toLowerCase().trim();
+      const companyKey = (contact.llc_owner || '').toLowerCase().trim();
+      const phoneKey = (contact.phone1 || '').replace(/\D/g, ''); // Remove non-digits
+      const emailKey = (contact.email1 || '').toLowerCase().trim();
+
+      // Create composite key for duplicate detection
+      const duplicateKey = `${nameKey}|${companyKey}|${phoneKey}|${emailKey}`;
+
+      if (!seen.has(duplicateKey)) {
+        seen.set(duplicateKey, true);
+        unique.push(contact);
+      } else {
+        console.log(`🔄 Skipping duplicate: ${contact.name || contact.llc_owner}`);
+      }
+    }
+
+    return unique;
+  }
+
+  /**
    * Bulk insert contacts from Claude extraction
    */
   async bulkInsertContacts(claudeContacts) {
@@ -150,7 +227,16 @@ class PostgresContactService {
 
       console.log(`💾 Bulk inserting ${postgresContacts.length} valid contacts into PostgreSQL...`);
 
-      const result = await this.Contact.bulkCreate(postgresContacts, {
+      // Remove duplicates before insertion based on name/company + phone/email
+      const uniqueContacts = this.removeDuplicates(postgresContacts);
+      console.log(`💾 Inserting ${uniqueContacts.length} unique contacts (${postgresContacts.length - uniqueContacts.length} duplicates removed)...`);
+
+      // Log a sample contact for debugging
+      if (uniqueContacts.length > 0) {
+        console.log('📋 Sample contact data:', JSON.stringify(uniqueContacts[0], null, 2));
+      }
+
+      const result = await this.Contact.bulkCreate(uniqueContacts, {
         ignoreDuplicates: true,
         returning: true,
         validate: true
@@ -158,11 +244,16 @@ class PostgresContactService {
 
       console.log(`✅ Successfully inserted ${result.length} contacts into PostgreSQL`);
 
+      if (result.length === 0 && uniqueContacts.length > 0) {
+        console.warn(`⚠️ Warning: ${uniqueContacts.length} contacts were processed but 0 were inserted - possible duplicates or validation issues`);
+      }
+
       return {
-        success: true,
+        success: result.length > 0 || uniqueContacts.length === 0,
         insertedCount: result.length,
         skippedCount: postgresContacts.length - result.length,
-        message: `Inserted ${result.length}/${postgresContacts.length} contacts`
+        processedCount: uniqueContacts.length,
+        message: `Inserted ${result.length}/${postgresContacts.length} contacts (${uniqueContacts.length} unique processed)`
       };
 
     } catch (error) {
@@ -311,16 +402,46 @@ class PostgresContactService {
   }
 
   /**
-   * Test database connection
+   * Test database connection and model
    */
   async testConnection() {
     try {
       await this.sequelize.authenticate();
+      console.log('✅ PostgreSQL connection successful');
+
+      // Test if table exists and can be queried
+      const count = await this.Contact.count();
+      console.log(`📊 Current contacts in database: ${count}`);
+
+      // Test a simple insert to verify model works
+      const testContact = {
+        name: 'Test Contact',
+        llc_owner: null,
+        phone1: '555-0123',
+        email1: 'test@example.com',
+        address: '123 Test St',
+        city: 'Test City',
+        state: 'TX',
+        zip: '12345',
+        acknowledged: false,
+        islegal: false
+      };
+
+      console.log('🧪 Testing single contact insert...');
+      const testResult = await this.Contact.create(testContact);
+      console.log('✅ Test insert successful, ID:', testResult.id);
+
+      // Clean up test record
+      await testResult.destroy();
+      console.log('🧹 Test record cleaned up');
+
       return {
         success: true,
-        message: 'PostgreSQL connection successful'
+        message: 'PostgreSQL connection and model working correctly',
+        contactCount: count
       };
     } catch (error) {
+      console.error('❌ Database test failed:', error.message);
       return {
         success: false,
         error: error.message
