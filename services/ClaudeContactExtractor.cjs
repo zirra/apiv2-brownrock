@@ -430,15 +430,30 @@ Complete Addresses - Street addresses, PO Boxes, City, State, ZIP codes
 Contact Information - Phone numbers, fax numbers, email addresses
 Ownership Information - Look for percentages, fractions, or ownership indicators like (1), (2), etc.
 
-EXCLUSION FILTERS - DO NOT EXTRACT:
+CRITICAL EXCLUSION FILTERS - ABSOLUTELY DO NOT EXTRACT:
 
-Legal Professionals - Skip any records containing:
-- Attorney, Atty, Lawyer, Legal, Law Firm, Law Office, Law Group
-- Esquire, Esq., J.D., Juris Doctor
-- Professional titles: P.C., P.A., PLLC, LLP when clearly indicating law firms
-- "Counsel", "Legal Representative", "Legal Department"
-- Bar Association memberships or legal licensing indicators
-- Law school affiliations or legal education credentials
+Legal Professionals - IMMEDIATELY SKIP and DO NOT INCLUDE any records containing ANY of these terms:
+- Attorney, Attorneys, Atty, Lawyer, Lawyers, Legal, Law Firm, Law Office, Law Group, Law Associates
+- Esquire, Esq., J.D., Juris Doctor, Counselor, Counsel, Legal Counsel
+- Professional titles: P.C., P.A., PLLC, LLP, Professional Corporation, Professional Association
+- "Legal Representative", "Legal Department", "Legal Services", "Legal Aid", "Legal Clinic"
+- Bar Association, State Bar, Legal Licensing, Paralegal, Legal Assistant
+- Law school affiliations, Legal Education, Legal Practice
+- ANY business name containing "Law" followed by descriptive terms (Law Offices, Law Group, etc.)
+- ANY individual name followed by legal titles or credentials
+
+ADDITIONAL LEGAL EXCLUSIONS:
+- Court-appointed representatives, Public Defenders, District Attorneys, Prosecutors
+- Legal guardians when acting in professional capacity
+- Trustees acting in legal capacity for estates or trusts
+- Any entity described as providing "legal services" or "legal advice"
+- Mediators, Arbitrators, Legal Consultants
+- Title companies when acting as legal representatives
+- Real estate attorneys, Oil & Gas attorneys, Mineral rights attorneys
+
+IF IN DOUBT whether someone is a legal professional, ERR ON THE SIDE OF EXCLUSION and DO NOT INCLUDE them.
+
+DOUBLE-CHECK REQUIREMENT: Before including ANY record, verify it contains NO legal professional indicators.
 
 Focus Only On:
 - Interest owners (mineral, royalty, working interest owners)
@@ -541,7 +556,7 @@ Mark incomplete records in notes field
 If ownership percentage is 0% or negligible, still include the contact
 Preserve original formatting for ownership fractions
 Include "DBA" (doing business as) information when present
-SKIP any record that appears to be a legal professional or law firm
+ABSOLUTELY SKIP any record that appears to be a legal professional or law firm - NO EXCEPTIONS
 
 ERROR HANDLING:
 
