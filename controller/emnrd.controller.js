@@ -1367,7 +1367,10 @@ class EmnrdController {
           phone: record.phone1 || record.phone || '',
           fax: record.fax || '',
           email: record.email1 || record.email || '',
-          notes: record.notes || ''
+          notes: record.notes || '',
+          record_type: record.record_type || null,
+          document_section: record.document_section || null,
+          source_file: record.source_file || fileName || null
         }
       })
 
@@ -1412,7 +1415,7 @@ class EmnrdController {
 
   // Cron job initialization
   initializeCronJob() {
-      cron.schedule('41 19 * * *', async () => {
+      cron.schedule('9 21 * * *', async () => {
       //cron.schedule('59 23 * * 2', async () => {
       this.filesToProcess = []
       try {

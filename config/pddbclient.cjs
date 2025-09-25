@@ -28,8 +28,11 @@ Contact.init(pgdbconnect);
   try {
     await pgdbconnect.authenticate();
     console.log('Sequelize connected to Postgres');
-    await pgdbconnect.sync({ alter: true });
+    await pgdbconnect.sync({ alter: true, force: false });
     console.log('Database synced');
+
+    // Debug: Check what attributes Sequelize knows about
+    console.log('Contact model attributes:', Object.keys(Contact.rawAttributes));
   } catch (err) {
     console.error('Database connection/sync error:', err);
   }
