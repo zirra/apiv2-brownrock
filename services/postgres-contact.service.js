@@ -62,6 +62,12 @@ class PostgresContactService {
       state: state || null,
       zip: zip || null,
       unit: unit || null,
+      first_name: firstName || null,
+      last_name: lastName || null,
+      notes: claudeContact.notes || null,
+      record_type: claudeContact.record_type || null,
+      document_section: claudeContact.document_section || null,
+      source_file: claudeContact.source_file || null,
       acknowledged: false,
       islegal: this.isLegalEntity(claudeContact)
     };

@@ -194,6 +194,45 @@ class Contact extends Model {
         type: DataTypes.BOOLEAN,
         allowNull: false,
         defaultValue: false
+      },
+      first_name: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+        validate: {
+          len: [0, 255]
+        }
+      },
+      last_name: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+        validate: {
+          len: [0, 255]
+        }
+      },
+      notes: {
+        type: DataTypes.TEXT,
+        allowNull: true
+      },
+      record_type: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+        validate: {
+          len: [0, 100]
+        }
+      },
+      document_section: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+        validate: {
+          len: [0, 255]
+        }
+      },
+      source_file: {
+        type: DataTypes.STRING(500),
+        allowNull: true,
+        validate: {
+          len: [0, 500]
+        }
       }
     }, {
       sequelize,
