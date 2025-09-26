@@ -468,7 +468,10 @@ class ClaudeContactExtractor {
   /**
    * Use Claude to extract contact information from text
    */
-  async extractContactInfoWithClaude(textContent) {
+  async extractContactInfoWithClaude(textContent, retryCount = 0) {
+    const maxRetries = 3
+    const baseDelay = 2000 // 2 seconds
+
     const prompt = `
 Please analyze the following text content from a PDF and extract all contact information from structured data including:
 
@@ -674,12 +677,23 @@ ${textContent.substring(0, 10000)}
     } catch (error) {
       this.logger.error('Error processing with Claude:', error.message);
 
-      // Handle rate limit errors specifically
-      if (error.status === 429) {
-        this.logger.warn('Rate limit exceeded, waiting 60 seconds before retrying...');
-        await new Promise(resolve => setTimeout(resolve, 60000)); // Wait 1 minute
+      // Handle rate limit (429) and overloaded (529) errors with exponential backoff
+      if ((error.status === 429 || error.status === 529) && retryCount < maxRetries) {
+        const delay = baseDelay * Math.pow(2, retryCount) // Exponential backoff: 2s, 4s, 8s
+        this.logger.warn(`Claude ${error.status === 529 ? 'overloaded (529)' : 'rate limited (429)'}, waiting ${delay/1000}s before retry ${retryCount + 1}/${maxRetries}...`);
 
-        // Optionally retry once
+        // Wait with exponential backoff
+        await new Promise(resolve => setTimeout(resolve, delay));
+
+        // Recursive retry
+        return await this.extractContactInfoWithClaude(textContent, retryCount + 1);
+
+      } else if (error.status === 429 || error.status === 529) {
+        // Final attempt with longer wait for overloaded servers
+        const longDelay = error.status === 529 ? 30000 : 60000 // 30s for overloaded, 60s for rate limit
+        this.logger.warn(`Claude ${error.status === 529 ? 'overloaded' : 'rate limited'}, final retry in ${longDelay/1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, longDelay));
+
         try {
           const retryResponse = await this.anthropic.messages.create({
             model: "claude-sonnet-4-20250514",
@@ -694,10 +708,11 @@ ${textContent.substring(0, 10000)}
           const jsonMatch = responseText.match(/\[[\s\S]*\]/);
           if (jsonMatch) {
             const contacts = JSON.parse(jsonMatch[0]);
+            this.logger.info(`✅ Claude final retry successful: ${contacts.length} contacts extracted`);
             return Array.isArray(contacts) ? contacts : [];
           }
         } catch (retryError) {
-          this.logger.error('Retry also failed:', retryError.message);
+          this.logger.error(`Final retry also failed: ${retryError.message}`);
         }
       }
 

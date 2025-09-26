@@ -262,7 +262,8 @@ class OCRController {
           method: ocrResult.method,
           textLength: ocrResult.extractedText.length,
           processingSteps: ocrResult.processingSteps,
-          text: ocrResult.extractedText
+          text: ocrResult.extractedText,
+          textPreview: ocrResult.extractedText.substring(0, 500) // First 500 chars for debugging
         }
 
         results.files.push(fileResult)
@@ -276,6 +277,12 @@ class OCRController {
           results.failed++
           results.methods.none++
           console.log(`❌ Failed: No text extracted`)
+        }
+
+        // Add delay between files to avoid overwhelming Claude API
+        if (files.indexOf(file) < files.length - 1) {
+          console.log(`⏱️ Waiting 3 seconds before processing next file...`)
+          await new Promise(resolve => setTimeout(resolve, 3000))
         }
 
       } catch (error) {
@@ -322,9 +329,19 @@ class OCRController {
     for (const fileResult of successfulFiles) {
       try {
         console.log(`🔍 Analyzing contacts in: ${fileResult.file}`)
+        console.log(`📄 Text sample (first 1000 chars): ${fileResult.text.substring(0, 1000)}`)
+        console.log(`📄 Middle text sample: ${fileResult.text.substring(Math.floor(fileResult.text.length/2), Math.floor(fileResult.text.length/2) + 1000)}`)
+
+        // Save full text to temp file for inspection
+        const fs = require('fs')
+        const tempTextFile = `./temp/debug_${Date.now()}_extracted_text.txt`
+        fs.writeFileSync(tempTextFile, fileResult.text)
+        console.log(`💾 Full extracted text saved to: ${tempTextFile}`)
 
         // Use existing PDF service to extract contacts (it uses Claude AI)
         const contacts = await this.extractContactsFromText(fileResult.text, fileResult.file)
+
+        console.log(`🤖 Claude AI returned ${contacts.length} contacts for ${fileResult.file}`)
 
         const fileContactResult = {
           file: fileResult.file,

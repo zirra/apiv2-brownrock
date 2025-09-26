@@ -258,29 +258,69 @@ class OCRService {
             processedImagePath = await this.preprocessImage(imagePath)
           }
 
-          // Run Tesseract OCR
+          // Try multiple Tesseract approaches and pick the best result
           const outputPath = processedImagePath.replace('.png', '')
-          const tesseractCommand = [
+
+          // Approach 1: PSM 6 (uniform block of text)
+          let tesseractCommand = [
             'tesseract',
             processedImagePath,
-            outputPath,
+            outputPath + '_psm6',
             '-l', this.config.tesseractLang,
-            '--oem', '3', // Use LSTM OCR Engine Mode
-            '--psm', '6', // Assume uniform block of text
+            '--oem', '3',
+            '--psm', '6', // Uniform block of text
+            '-c', 'preserve_interword_spaces=1',
             'quiet'
           ].join(' ')
 
-          execSync(tesseractCommand, { stdio: 'pipe' })
+          let pageText = ''
 
-          // Read the extracted text
-          const textFile = outputPath + '.txt'
-          if (fs.existsSync(textFile)) {
-            const pageText = fs.readFileSync(textFile, 'utf8')
-            allText += pageText + '\n\n'
+          try {
+            execSync(tesseractCommand, { stdio: 'pipe' })
+            const textFile1 = outputPath + '_psm6.txt'
+            if (fs.existsSync(textFile1)) {
+              const text1 = fs.readFileSync(textFile1, 'utf8')
+              pageText = text1
+              fs.unlinkSync(textFile1)
+              console.log(`📄 PSM 6 extracted ${text1.length} chars from ${path.basename(imagePath)}`)
+            }
+          } catch (e) {
+            console.log(`⚠️ PSM 6 failed for ${path.basename(imagePath)}, trying PSM 4`)
+          }
+
+          // Approach 2: PSM 4 (single column) if PSM 6 failed or got little text
+          if (pageText.length < 100) {
+            tesseractCommand = [
+              'tesseract',
+              processedImagePath,
+              outputPath + '_psm4',
+              '-l', this.config.tesseractLang,
+              '--oem', '3',
+              '--psm', '4', // Single column of variable sizes
+              '-c', 'preserve_interword_spaces=1',
+              'quiet'
+            ].join(' ')
+
+            try {
+              execSync(tesseractCommand, { stdio: 'pipe' })
+              const textFile2 = outputPath + '_psm4.txt'
+              if (fs.existsSync(textFile2)) {
+                const text2 = fs.readFileSync(textFile2, 'utf8')
+                if (text2.length > pageText.length) {
+                  pageText = text2
+                  console.log(`📄 PSM 4 extracted ${text2.length} chars from ${path.basename(imagePath)} (better than PSM 6)`)
+                }
+                fs.unlinkSync(textFile2)
+              }
+            } catch (e) {
+              console.log(`⚠️ PSM 4 also failed for ${path.basename(imagePath)}`)
+            }
+          }
+
+          // Add the extracted text to total
+          allText += pageText + '\n\n'
+          if (pageText.length > 0) {
             processedPages++
-
-            // Cleanup text file
-            fs.unlinkSync(textFile)
           }
 
           // Cleanup preprocessed image if different from original
@@ -323,15 +363,16 @@ class OCRService {
     try {
       const preprocessedPath = imagePath.replace('.png', '_processed.png')
 
-      // ImageMagick preprocessing: enhance contrast, reduce noise
+      // ImageMagick preprocessing optimized for table text
       const preprocessCommand = [
         'convert',
         imagePath,
-        '-enhance',
-        '-contrast-stretch', '0.15x0.05%',
-        '-colorspace', 'gray',
-        '-blur', '0x0.5',
-        '-sharpen', '0x1',
+        '-colorspace', 'gray',              // Convert to grayscale
+        '-contrast-stretch', '0.05x0.05%',  // Increase contrast
+        '-morphology', 'close', 'rectangle:1x1', // Fill small gaps
+        '-despeckle',                       // Remove noise
+        '-enhance',                         // Enhance image
+        '-sharpen', '0x1',                  // Sharpen text
         preprocessedPath
       ].join(' ')
 
