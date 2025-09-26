@@ -3,6 +3,7 @@ node_modules
 downloads
 ignore
 pdfs
+temp
 brownrock.web
 # local env files
 .env

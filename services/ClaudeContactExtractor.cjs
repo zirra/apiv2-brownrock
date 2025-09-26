@@ -310,9 +310,35 @@ class ClaudeContactExtractor {
         this.logger.info(`📷 Using image-based processing (Textract OCR)`)
 
         if (this.processingConfig.useTextract && pdfKey) {
+          // Check file size and compress if needed for Textract
+          const stats = fs.statSync(tempFile)
+          const textractLimit = parseInt(process.env.TEXTRACT_SIZE_LIMIT) || (10 * 1024 * 1024) // Default 10MB, configurable
+
+          if (stats.size > textractLimit && this.processingConfig.useGhostscript) {
+            this.logger.info(`🗜️ PDF too large (${(stats.size/1024/1024).toFixed(1)}MB), compressing for Textract...`)
+
+            // Temporarily use maximum compression for Textract
+            const originalQuality = this.processingConfig.gsQuality
+            this.processingConfig.gsQuality = 'screen' // Maximum compression
+
+            const optimizationResult = await this.optimizePdfWithGhostscript(tempFile)
+            tempFile = optimizationResult.optimizedPath
+
+            // Restore original quality
+            this.processingConfig.gsQuality = originalQuality
+          }
+
           const textractResult = await this.extractTextWithTextract(tempFile, pdfKey)
-          extractedText = textractResult.extractedText
-          method = 'textract-only'
+          if (textractResult.extractedText && textractResult.extractedText.length > 0) {
+            extractedText = textractResult.extractedText
+            method = stats.size > textractLimit ? 'textract-compressed' : 'textract-only'
+          } else {
+            // Textract failed, fall back to basic extraction
+            this.logger.info(`⚠️ Textract failed/returned empty, falling back to basic extraction`)
+            const textResult = await this.extractTextFromPdf(tempFile)
+            extractedText = textResult.extractedText
+            method = 'basic-fallback-from-textract'
+          }
         } else {
           // Fallback to basic extraction
           const textResult = await this.extractTextFromPdf(tempFile)
@@ -357,8 +383,32 @@ class ClaudeContactExtractor {
 
     } catch (error) {
       this.logger.error(`Error in optimized text extraction: ${error.message}`)
-      // Fallback to basic method
-      return await this.extractTextFromPDF(pdfBuffer)
+      this.logger.info(`🔄 Falling back to basic PDF text extraction...`)
+
+      try {
+        // Fallback: Save buffer to temp file and use basic extraction
+        const tempDir = this.processingConfig.localPdfPath || './temp'
+        if (!fs.existsSync(tempDir)) {
+          fs.mkdirSync(tempDir, { recursive: true })
+        }
+
+        const fallbackTempFile = path.join(tempDir, `fallback_${Date.now()}.pdf`)
+        fs.writeFileSync(fallbackTempFile, pdfBuffer)
+
+        const fallbackResult = await this.extractTextFromPdf(fallbackTempFile)
+
+        // Cleanup temp file
+        if (fs.existsSync(fallbackTempFile)) {
+          fs.unlinkSync(fallbackTempFile)
+        }
+
+        this.logger.info(`✅ Fallback extraction: ${fallbackResult.extractedText.length} chars`)
+        return fallbackResult.extractedText || ''
+
+      } catch (fallbackError) {
+        this.logger.error(`❌ Fallback extraction also failed: ${fallbackError.message}`)
+        return ''
+      }
     }
   }
 
@@ -429,6 +479,8 @@ Individual Names - Personal names that may be property owners, officers, or cont
 Complete Addresses - Street addresses, PO Boxes, City, State, ZIP codes
 Contact Information - Phone numbers, fax numbers, email addresses
 Ownership Information - Look for percentages, fractions, or ownership indicators like (1), (2), etc.
+Mailing tables
+Postal Tables
 
 CRITICAL EXCLUSION FILTERS - ABSOLUTELY DO NOT EXTRACT:
 
@@ -462,6 +514,8 @@ Focus Only On:
 - Mailing lists for notices and payments
 - Business entities involved in oil & gas operations
 - Individual property owners and interest holders
+- Postal delivery reports
+- Mailing tables with names and addresses
 
 SPECIFIC PATTERNS TO LOOK FOR:
 
@@ -470,12 +524,20 @@ Interest Owner Tables:
 - Tables with "WI Owner", "Working Interest Owner", "ORRI Owner", "ORRI Owners", "ORRI Owners to be Pooled", "Overriding Royalty Interest Owner" headers
 - Tables with "Unleased Owner", "UMI", "Leased", "Leased Owner" headers
 - Tables with "Mineral Interest Owner", "MI Owner", "Uncommitted Mineral Interest" headers
+- Tables with descriptions containing ORRI
 
 Mailing and Contact Lists:
 - Mailing lists for revenue distributions
 - Notice recipient lists
 - Contact directories for interest owners
 - Emergency contact information for operations
+
+Postal Delivery Tables and Mailing Reports:
+- Tables with tracking numbers followed by recipient names and addresses
+- Format: Tracking Number | Name | Address Line 1 | City | State | ZIP
+- Multiple recipients listed in tabular format with delivery tracking data
+- Recipient names may include trust information with "dtd" (dated) notations
+- Mailing lists sent via certified mail or registered mail
 
 Business Operations:
 - Oil & gas industry entities (Royalty, Mineral, Resources, Energy, Exploration companies)
@@ -507,6 +569,15 @@ Parse multi-line addresses carefully
 Distinguish between leased and unleased mineral interests
 Capture decimal interest notations common in oil & gas (e.g., 0.125000, 0.25000)
 
+For Postal Delivery Tables:
+- Extract the recipient name from the name column (ignore tracking numbers)
+- IGNORE all tracking numbers, delivery status messages, timestamps, and delivery updates
+- For Trust names, include the full trust name with "dtd" (dated) information in the name/company field
+- Parse multi-line recipient names (e.g., "Larry Bond Living Trust dtd 5/14/2015")
+- Treat trusts as companies with the trust name in the company field
+- Extract individual names when clearly identifiable, otherwise treat as company
+- Format addresses consistently: Street Address, City, State ZIP
+
 DUPLICATE HANDLING:
 
 Remove duplicate entries based on exact name/company matches
@@ -527,6 +598,12 @@ Preserve ZIP+4 codes when present
 Handle international addresses
 
 DATA VALIDATION:
+
+For Postal Table Records:
+- Verify each record has both a name/company AND a complete address
+- Ensure city, state, and ZIP are properly combined into address field
+- Trust names should go in company field with full dtd notation preserved
+- Individual names should be parsed into first_name and last_name when possible
 
 Ensure phone numbers follow standard formats
 Validate email addresses have proper format
