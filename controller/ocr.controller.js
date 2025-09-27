@@ -338,10 +338,17 @@ class OCRController {
         fs.writeFileSync(tempTextFile, fileResult.text)
         console.log(`💾 Full extracted text saved to: ${tempTextFile}`)
 
+        // Add status tracking for Claude AI processing
+        console.log(`🤖 Sending ${fileResult.textLength.toLocaleString()} characters to Claude AI for contact extraction...`)
+        console.log(`⏳ This may take 2-5 minutes for large documents. Please wait...`)
+
+        const claudeStartTime = Date.now()
+
         // Use existing PDF service to extract contacts (it uses Claude AI)
         const contacts = await this.extractContactsFromText(fileResult.text, fileResult.file)
 
-        console.log(`🤖 Claude AI returned ${contacts.length} contacts for ${fileResult.file}`)
+        const claudeProcessingTime = ((Date.now() - claudeStartTime) / 1000).toFixed(1)
+        console.log(`🤖 Claude AI completed in ${claudeProcessingTime}s - returned ${contacts.length} contacts for ${fileResult.file}`)
 
         const fileContactResult = {
           file: fileResult.file,
@@ -484,6 +491,212 @@ class OCRController {
       res.status(500).json({
         success: false,
         message: `Single file OCR processing failed: ${error.message}`
+      })
+    }
+  }
+
+  /**
+   * Process single file with Claude only (no OCR) - for testing raw PDF text extraction
+   */
+  async processSingleFileClaudeOnly(req, res) {
+    try {
+      const { pdfKey } = req.body
+
+      if (!pdfKey) {
+        return res.status(400).json({
+          success: false,
+          message: 'pdfKey is required'
+        })
+      }
+
+      console.log(`🔍 Processing single file with Claude only (no OCR): ${pdfKey}`)
+
+      // Download file from S3
+      const s3Object = await this.s3Service.getObject(pdfKey)
+      const pdfBuffer = await s3Object.Body.transformToByteArray()
+
+      // Use basic PDF text extraction only (skip all OCR)
+      const pdf = require('pdf-parse')
+      const startTime = Date.now()
+
+      console.log(`📄 Extracting text with basic PDF parser...`)
+      const pdfData = await pdf(Buffer.from(pdfBuffer))
+      const extractedText = pdfData.text.replace(/\s+/g, ' ').trim()
+      const extractionTime = Date.now() - startTime
+
+      console.log(`📄 Basic PDF extraction: ${extractedText.length} characters from ${pdfData.numpages} pages in ${extractionTime}ms`)
+
+      let contacts = []
+      const result = {
+        success: extractedText.length > 0,
+        file: pdfKey,
+        method: 'basic-pdf-only',
+        extractedText: extractedText.substring(0, 1000) + (extractedText.length > 1000 ? '... (truncated for display)' : ''),
+        fullTextLength: extractedText.length,
+        pages: pdfData.numpages,
+        extractionTime: extractionTime,
+        contactCount: 0,
+        contacts: [],
+        processingTimestamp: new Date().toISOString()
+      }
+
+      if (extractedText.length > 0) {
+        console.log(`🚀 Calling Claude API with ${extractedText.length.toLocaleString()} characters...`)
+
+        // Extract contacts using Claude
+        contacts = await this.extractContactsFromText(extractedText, pdfKey)
+        result.contactCount = contacts.length
+        result.contacts = contacts.slice(0, 10) // Return first 10 contacts
+
+        // Save to PostgreSQL
+        if (contacts.length > 0 && this.postgresContactService) {
+          const saveResult = await this.postgresContactService.bulkInsertContacts(contacts)
+          result.savedToPostgres = saveResult.success
+          result.insertedCount = saveResult.insertedCount || 0
+        }
+      }
+
+      res.json(result)
+
+    } catch (error) {
+      console.error(`❌ Claude-only processing failed: ${error.message}`)
+      res.status(500).json({
+        success: false,
+        message: `Claude-only processing failed: ${error.message}`
+      })
+    }
+  }
+
+  /**
+   * Process single file with Ghostscript flattening + Claude (no OCR) - for testing flattened PDF text extraction
+   */
+  async processSingleFileGhostscriptClaude(req, res) {
+    try {
+      const { pdfKey } = req.body
+
+      if (!pdfKey) {
+        return res.status(400).json({
+          success: false,
+          message: 'pdfKey is required'
+        })
+      }
+
+      console.log(`🔍 Processing single file with Ghostscript + Claude (no OCR): ${pdfKey}`)
+
+      // Download file from S3
+      const s3Object = await this.s3Service.getObject(pdfKey)
+      const pdfBuffer = await s3Object.Body.transformToByteArray()
+
+      // Save to temp file for Ghostscript processing
+      const fs = require('fs')
+      const path = require('path')
+      const { execSync } = require('child_process')
+
+      const tempDir = process.env.OCR_TEMP_DIR || './temp/ocr'
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true })
+      }
+
+      const inputFile = path.join(tempDir, `gs_input_${Date.now()}.pdf`)
+      const outputFile = path.join(tempDir, `gs_output_${Date.now()}.pdf`)
+
+      try {
+        // Save original PDF
+        fs.writeFileSync(inputFile, Buffer.from(pdfBuffer))
+        console.log(`📁 Saved input PDF: ${inputFile}`)
+
+        // Flatten PDF with Ghostscript
+        const startGsTime = Date.now()
+        const gsQuality = process.env.GS_QUALITY || 'ebook'
+
+        console.log(`🔧 Flattening PDF with Ghostscript (quality: ${gsQuality})...`)
+
+        const gsCommand = [
+          'gs',
+          '-sDEVICE=pdfwrite',
+          '-dCompatibilityLevel=1.4',
+          '-dPDFSETTINGS=/' + gsQuality,
+          '-dNOPAUSE',
+          '-dQUIET',
+          '-dBATCH',
+          '-sOutputFile=' + outputFile,
+          inputFile
+        ].join(' ')
+
+        execSync(gsCommand, { stdio: 'pipe' })
+        const gsTime = Date.now() - startGsTime
+
+        console.log(`✅ Ghostscript flattening completed in ${gsTime}ms`)
+
+        // Read flattened PDF
+        const flattenedBuffer = fs.readFileSync(outputFile)
+        console.log(`📊 Original: ${pdfBuffer.length} bytes → Flattened: ${flattenedBuffer.length} bytes`)
+
+        // Extract text from flattened PDF
+        const pdf = require('pdf-parse')
+        const startExtractTime = Date.now()
+
+        console.log(`📄 Extracting text from flattened PDF...`)
+        const pdfData = await pdf(flattenedBuffer)
+        const extractedText = pdfData.text.replace(/\s+/g, ' ').trim()
+        const extractionTime = Date.now() - startExtractTime
+
+        console.log(`📄 Text extraction: ${extractedText.length} characters from ${pdfData.numpages} pages in ${extractionTime}ms`)
+
+        // Cleanup temp files
+        if (fs.existsSync(inputFile)) fs.unlinkSync(inputFile)
+        if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile)
+
+        let contacts = []
+        const result = {
+          success: extractedText.length > 0,
+          file: pdfKey,
+          method: 'ghostscript-flattened',
+          originalSize: pdfBuffer.length,
+          flattenedSize: flattenedBuffer.length,
+          compressionRatio: (pdfBuffer.length / flattenedBuffer.length).toFixed(2),
+          gsQuality: gsQuality,
+          gsTime: gsTime,
+          extractedText: extractedText.substring(0, 1000) + (extractedText.length > 1000 ? '... (truncated for display)' : ''),
+          fullTextLength: extractedText.length,
+          pages: pdfData.numpages,
+          extractionTime: extractionTime,
+          contactCount: 0,
+          contacts: [],
+          processingTimestamp: new Date().toISOString()
+        }
+
+        if (extractedText.length > 0) {
+          console.log(`🚀 Calling Claude API with ${extractedText.length.toLocaleString()} characters from flattened PDF...`)
+
+          // Extract contacts using Claude
+          contacts = await this.extractContactsFromText(extractedText, pdfKey)
+          result.contactCount = contacts.length
+          result.contacts = contacts.slice(0, 10) // Return first 10 contacts
+
+          // Save to PostgreSQL
+          if (contacts.length > 0 && this.postgresContactService) {
+            const saveResult = await this.postgresContactService.bulkInsertContacts(contacts)
+            result.savedToPostgres = saveResult.success
+            result.insertedCount = saveResult.insertedCount || 0
+          }
+        }
+
+        res.json(result)
+
+      } catch (gsError) {
+        // Cleanup on error
+        if (fs.existsSync(inputFile)) fs.unlinkSync(inputFile)
+        if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile)
+
+        throw new Error(`Ghostscript processing failed: ${gsError.message}`)
+      }
+
+    } catch (error) {
+      console.error(`❌ Ghostscript + Claude processing failed: ${error.message}`)
+      res.status(500).json({
+        success: false,
+        message: `Ghostscript + Claude processing failed: ${error.message}`
       })
     }
   }
@@ -646,6 +859,8 @@ module.exports.controller = (app) => {
   // Main OCR processing endpoints
   app.post('/v1/ocr/process-all', (req, res) => ocrController.processS3PdfsWithOCR(req, res))
   app.post('/v1/ocr/process-single', (req, res) => ocrController.processSingleFileWithOCR(req, res))
+  app.post('/v1/ocr/process-claude-only', (req, res) => ocrController.processSingleFileClaudeOnly(req, res))
+  app.post('/v1/ocr/process-ghostscript-claude', (req, res) => ocrController.processSingleFileGhostscriptClaude(req, res))
 
   // Status and configuration endpoints
   app.get('/v1/ocr/status', (req, res) => ocrController.getOCRStatus(req, res))

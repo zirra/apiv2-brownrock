@@ -686,7 +686,7 @@ class EmnrdController {
           const pdf = allPdfs[i]
           const s3Key = `pdfs/${applicant}/${pdf.FileName}`
           
-          if (pdf.FileSize > this.config.maxFileSize) {
+          if (pdf.FileSize <= this.config.maxFileSize) {
             try {
               this.filesToProcess.push(s3Key)
               
@@ -741,8 +741,14 @@ class EmnrdController {
               console.error(`❌ Processing failed for ${pdf.FileName}: ${processErr.message}`)
               await this.loggingService.writeMessage('processingFail', `${processErr.message} ${pdf.FileName}`)
             }
+
+            // Add small delay between files to avoid Claude rate limits
+            if (i < allPdfs.length - 1) { // Don't delay after the last file
+              console.log(`⏸️ Waiting 3 seconds before next file to avoid rate limits...`)
+              await new Promise(resolve => setTimeout(resolve, 3000))
+            }
           } else {
-            console.log(`⚠️ ${pdf.FileName} skipping due to file size (${pdf.FileSize} bytes < ${this.config.maxFileSize} bytes)`)
+            console.log(`⚠️ ${pdf.FileName} skipping due to file size (${pdf.FileSize} bytes > ${this.config.maxFileSize} bytes)`)
           }
         }
       }
@@ -1738,7 +1744,7 @@ class EmnrdController {
   // Cron job initialization
   initializeCronJob() {
       // Original job - Tuesday 11:59 PM
-      //cron.schedule('9 21 * * *', async () => {
+      //cron.schedule('34 16 * * *', async () => {
       cron.schedule('59 23 * * 2', async () => {
       this.filesToProcess = []
       try {

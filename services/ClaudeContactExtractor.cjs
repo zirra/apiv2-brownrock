@@ -472,190 +472,64 @@ class ClaudeContactExtractor {
     const maxRetries = 3
     const baseDelay = 2000 // 2 seconds
 
-    const prompt = `
-Please analyze the following text content from a PDF and extract all contact information from structured data including:
+    const prompt = `Extract contact information from this oil & gas document. Return JSON array only.
 
-PRIORITY DATA TO EXTRACT:
+EXTRACT:
+- Names (individuals, companies, trusts)
+- Complete addresses
+- Phone/email if present
+- Ownership info (percentages, interest types)
 
-Company/Entity Names - Look for LLC, Inc, LP, Company, Corporation, Resources, Oil, Gas, Minerals, Holdings, Trust, Partnership, etc.
-Individual Names - Personal names that may be property owners, officers, or contacts
-Complete Addresses - Street addresses, PO Boxes, City, State, ZIP codes
-Contact Information - Phone numbers, fax numbers, email addresses
-Ownership Information - Look for percentages, fractions, or ownership indicators like (1), (2), etc.
-Mailing tables
-Postal Tables
+PRIORITY SOURCES (extract ALL):
+- Postal delivery tables/certified mail lists
+- Interest owner tables (WI, ORRI, MI, UMI owners)
+- Revenue/mailing lists
 
-CRITICAL EXCLUSION FILTERS - ABSOLUTELY DO NOT EXTRACT:
+EXCLUDE (skip entirely):
+- Attorneys, lawyers, law firms
+- Legal professionals (Esq., J.D., P.C., P.A., PLLC, LLP)
+- Legal services/representatives
+EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, not lawyers)
 
-Legal Professionals - IMMEDIATELY SKIP and DO NOT INCLUDE any records containing ANY of these terms:
-- Attorney, Attorneys, Atty, Lawyer, Lawyers, Legal, Law Firm, Law Office, Law Group, Law Associates
-- Esquire, Esq., J.D., Juris Doctor, Counselor, Counsel, Legal Counsel
-- Professional titles: P.C., P.A., PLLC, LLP, Professional Corporation, Professional Association
-- "Legal Representative", "Legal Department", "Legal Services", "Legal Aid", "Legal Clinic"
-- Bar Association, State Bar, Legal Licensing, Paralegal, Legal Assistant
-- Law school affiliations, Legal Education, Legal Practice
-- ANY business name containing "Law" followed by descriptive terms (Law Offices, Law Group, etc.)
-- ANY individual name followed by legal titles or credentials
+POSTAL TABLES:
+- Ignore tracking numbers
+- Extract recipient names + addresses
+- Extract names + addresses
+- Combine address components
+- Trusts go in "company" field with full dtd notation
 
-ADDITIONAL LEGAL EXCLUSIONS:
-- Court-appointed representatives, Public Defenders, District Attorneys, Prosecutors
-- Legal guardians when acting in professional capacity
-- Trustees acting in legal capacity for estates or trusts
-- Any entity described as providing "legal services" or "legal advice"
-- Mediators, Arbitrators, Legal Consultants
-- Title companies when acting as legal representatives
-- Real estate attorneys, Oil & Gas attorneys, Mineral rights attorneys
+JSON FORMAT:
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Complete address",
+  "phone": "Phone with type",
+  "email": "Email if present",
+  "ownership_info": "Percentages/fractions",
+  "interest_type": "WI/ORRI/MI/etc",
+  "notes": "Additional details",
+  "record_type": "individual/company/joint",
+  "document_section": "Source table/section"
+}
 
-IF IN DOUBT whether someone is a legal professional, ERR ON THE SIDE OF EXCLUSION and DO NOT INCLUDE them.
+Requirements:
+- Must have name/company AND address
+- Remove duplicates
+- When uncertain if legal professional, exclude UNLESS from postal/interest table
+- No text outside JSON array
 
-DOUBLE-CHECK REQUIREMENT: Before including ANY record, verify it contains NO legal professional indicators.
-
-Focus Only On:
-- Interest owners (mineral, royalty, working interest owners)
-- Pooled parties and pooling participants
-- Revenue recipients and distribution parties
-- Mailing lists for notices and payments
-- Business entities involved in oil & gas operations
-- Individual property owners and interest holders
-- Postal delivery reports
-- Mailing tables with names and addresses
-
-SPECIFIC PATTERNS TO LOOK FOR:
-
-Interest Owner Tables:
-- Tables with "Owner", "Owners", "Lessor", "Lessee", "Owners to be pooled" headers
-- Tables with "WI Owner", "Working Interest Owner", "ORRI Owner", "ORRI Owners", "ORRI Owners to be Pooled", "Overriding Royalty Interest Owner" headers
-- Tables with "Unleased Owner", "UMI", "Leased", "Leased Owner" headers
-- Tables with "Mineral Interest Owner", "MI Owner", "Uncommitted Mineral Interest" headers
-- Tables with descriptions containing ORRI
-
-Mailing and Contact Lists:
-- Mailing lists for revenue distributions
-- Notice recipient lists
-- Contact directories for interest owners
-- Emergency contact information for operations
-
-Postal Delivery Tables and Mailing Reports:
-- Tables with tracking numbers followed by recipient names and addresses
-- Format: Tracking Number | Name | Address Line 1 | City | State | ZIP
-- Multiple recipients listed in tabular format with delivery tracking data
-- Recipient names may include trust information with "dtd" (dated) notations
-- Mailing lists sent via certified mail or registered mail
-
-Business Operations:
-- Oil & gas industry entities (Royalty, Mineral, Resources, Energy, Exploration companies)
-- Operating companies and their contacts
-- Service companies involved in operations
-- Regulatory contact information
-
-Document Types to Process:
-- Division order schedules or revenue distribution lists
-- Joint interest billing statements
-- Working interest schedules and mineral ownership reports
-- Royalty distribution statements and decimal interest listings
-- Pooling applications and orders
-- Unit agreements and participation schedules
-
-EXTRACTION RULES:
-
-If you see a company name immediately followed by an address, treat them as one contact record
-Phone numbers in parentheses like (cell), (office), (fax) should be noted with their type
-Capture ownership percentages, fractions, or decimal interests if present (e.g., "25%", "1/4", "0.25", "0.125000")
-Identify and capture interest types: WI (Working Interest), ORRI (Overriding Royalty Interest), MI (Mineral Interest), UMI (Uncommitted Mineral Interest), NRI (Net Revenue Interest), RI (Royalty Interest)
-Include PO Box addresses as complete addresses
-If a name appears with ownership indicators like (1) or (2), include that in notes
-For husband/wife or joint ownership, create separate records when possible
-Extract email addresses if present
-Handle "c/o" (care of) addresses appropriately
-Look for "Attn:" or "Attention:" lines for contact persons (unless they're attorneys)
-Parse multi-line addresses carefully
-Distinguish between leased and unleased mineral interests
-Capture decimal interest notations common in oil & gas (e.g., 0.125000, 0.25000)
-
-For Postal Delivery Tables:
-- Extract the recipient name from the name column (ignore tracking numbers)
-- IGNORE all tracking numbers, delivery status messages, timestamps, and delivery updates
-- For Trust names, include the full trust name with "dtd" (dated) information in the name/company field
-- Parse multi-line recipient names (e.g., "Larry Bond Living Trust dtd 5/14/2015")
-- Treat trusts as companies with the trust name in the company field
-- Extract individual names when clearly identifiable, otherwise treat as company
-- Format addresses consistently: Street Address, City, State ZIP
-
-DUPLICATE HANDLING:
-
-Remove duplicate entries based on exact name/company matches
-For near-duplicate names (minor spelling variations, abbreviations), consolidate into single record and note variations in notes field
-If same person/company appears with different addresses, create separate records but note the relationship in notes field
-If same person/company appears with different ownership interests, consolidate into single record with combined ownership information
-For husband/wife pairs that may appear separately and jointly, consolidate when clearly referring to same people
-Use fuzzy matching for common name variations (e.g., "John Smith" vs "J. Smith", "ABC Company" vs "ABC Co.")
-Priority order for consolidation: most complete address > most recent information > highest ownership percentage
-Note in 'notes' field when records have been consolidated from duplicates
-
-ADDRESS PARSING GUIDELINES:
-
-Combine multi-line addresses into single address field
-Include apartment/unit numbers
-Standardize state abbreviations
-Preserve ZIP+4 codes when present
-Handle international addresses
-
-DATA VALIDATION:
-
-For Postal Table Records:
-- Verify each record has both a name/company AND a complete address
-- Ensure city, state, and ZIP are properly combined into address field
-- Trust names should go in company field with full dtd notation preserved
-- Individual names should be parsed into first_name and last_name when possible
-
-Ensure phone numbers follow standard formats
-Validate email addresses have proper format
-Check that ZIP codes are reasonable (5 or 9 digits)
-Flag incomplete addresses in notes
-
-Return as a JSON array with these field names:
-
-company: Business/organization name (null if individual)
-name: Individual's full name (null if company only)
-first_name: Individual's first name (if separable)
-last_name: Individual's last name (if separable)
-address: Complete address including street, city, state, zip
-phone: Phone number with type if specified
-fax: Fax number if present
-email: Email address if present
-ownership_info: Any ownership percentages, fractions, decimal interests, or indicators (e.g., "25% WI", "1/8 ORRI", "0.125000 NRI", "UMI", "Unleased")
-interest_type: Type of ownership interest (e.g., "Working Interest", "ORRI", "Mineral Interest", "Royalty Interest", "UMI", "Leased", "Unleased")
-notes: Additional relevant details like heir/assign status, document references, incomplete data warnings, interest descriptions, duplicate consolidation notes
-record_type: "company" or "individual" or "joint"
-document_section: Which part of document this came from (if identifiable)
-
-QUALITY REQUIREMENTS:
-
-Only include records with at least a name/company AND address
-Mark incomplete records in notes field
-If ownership percentage is 0% or negligible, still include the contact
-Preserve original formatting for ownership fractions
-Include "DBA" (doing business as) information when present
-ABSOLUTELY SKIP any record that appears to be a legal professional or law firm - NO EXCEPTIONS
-
-ERROR HANDLING:
-
-If address is incomplete, note what's missing in notes field
-If name parsing is uncertain, include full name in 'name' field
-For unclear company vs individual determination, default to 'individual' and note uncertainty
-If unsure whether someone is a legal professional, err on the side of exclusion
-
-If no contact information is found, return an empty array [].
-Only return the JSON array, no additional text or formatting.
-
-Text content to analyze:
-${textContent.substring(0, 10000)}
+Text content:
+${textContent}
         `.trim();
 
     try {
+      this.logger.info(`🚀 Calling Claude API (attempt ${retryCount + 1}) with ${textContent.length.toLocaleString()} characters...`)
+
       const response = await this.anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 4000,
+        max_tokens: 8000,  // Increased for larger contact lists
         messages: [{
           role: "user",
           content: prompt
@@ -668,7 +542,9 @@ ${textContent.substring(0, 10000)}
       const jsonMatch = responseText.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
         const contacts = JSON.parse(jsonMatch[0]);
-        return Array.isArray(contacts) ? contacts : [];
+        const validContacts = Array.isArray(contacts) ? contacts : [];
+        this.logger.info(`✅ Claude API successful: extracted ${validContacts.length} contacts`);
+        return validContacts;
       } else {
         this.logger.warn('No JSON array found in Claude response');
         return [];
@@ -682,8 +558,24 @@ ${textContent.substring(0, 10000)}
         const delay = baseDelay * Math.pow(2, retryCount) // Exponential backoff: 2s, 4s, 8s
         this.logger.warn(`Claude ${error.status === 529 ? 'overloaded (529)' : 'rate limited (429)'}, waiting ${delay/1000}s before retry ${retryCount + 1}/${maxRetries}...`);
 
-        // Wait with exponential backoff
-        await new Promise(resolve => setTimeout(resolve, delay));
+        // Wait with exponential backoff with periodic status updates
+        if (delay >= 4000) { // For longer waits, show periodic updates
+          const updateInterval = Math.min(delay / 4, 5000) // Update every 1/4 of delay time, max 5s
+          let elapsed = 0
+
+          const intervalId = setInterval(() => {
+            elapsed += updateInterval
+            const remaining = Math.max(0, delay - elapsed)
+            this.logger.info(`⏳ Still waiting for Claude API... ${(remaining/1000).toFixed(1)}s remaining`)
+          }, updateInterval)
+
+          await new Promise(resolve => setTimeout(() => {
+            clearInterval(intervalId)
+            resolve()
+          }, delay))
+        } else {
+          await new Promise(resolve => setTimeout(resolve, delay))
+        }
 
         // Recursive retry
         return await this.extractContactInfoWithClaude(textContent, retryCount + 1);
@@ -697,7 +589,7 @@ ${textContent.substring(0, 10000)}
         try {
           const retryResponse = await this.anthropic.messages.create({
             model: "claude-sonnet-4-20250514",
-            max_tokens: 4000,
+            max_tokens: 8000,  // Increased for larger contact lists
             messages: [{
               role: "user",
               content: prompt
