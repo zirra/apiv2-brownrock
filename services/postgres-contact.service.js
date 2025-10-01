@@ -424,13 +424,46 @@ class PostgresContactService {
   }
 
   /**
-   * Deduplicate contacts in the database
-   * Finds duplicates based on name, company, phone, and email
-   * Keeps the oldest record (by created_at) and deletes the rest
+   * Calculate string similarity using Levenshtein distance
+   * Returns a value between 0 (completely different) and 1 (identical)
    */
-  async deduplicateContacts(dryRun = true) {
+  calculateSimilarity(str1, str2) {
+    if (!str1 || !str2) return 0;
+    if (str1 === str2) return 1;
+
+    const s1 = str1.toLowerCase();
+    const s2 = str2.toLowerCase();
+
+    const costs = [];
+    for (let i = 0; i <= s1.length; i++) {
+      let lastValue = i;
+      for (let j = 0; j <= s2.length; j++) {
+        if (i === 0) {
+          costs[j] = j;
+        } else if (j > 0) {
+          let newValue = costs[j - 1];
+          if (s1.charAt(i - 1) !== s2.charAt(j - 1)) {
+            newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
+          }
+          costs[j - 1] = lastValue;
+          lastValue = newValue;
+        }
+      }
+      if (i > 0) costs[s2.length] = lastValue;
+    }
+
+    const maxLength = Math.max(s1.length, s2.length);
+    return maxLength === 0 ? 1 : (maxLength - costs[s2.length]) / maxLength;
+  }
+
+  /**
+   * Deduplicate contacts with multiple strategies
+   * @param {string} mode - 'strict', 'name-only', 'name-company', or 'fuzzy'
+   * @param {boolean} dryRun - If true, only preview duplicates without deleting
+   */
+  async deduplicateContactsByMode(mode = 'strict', dryRun = true) {
     try {
-      console.log(`🔍 Starting deduplication process (dryRun: ${dryRun})...`);
+      console.log(`🔍 Starting ${mode} deduplication (dryRun: ${dryRun})...`);
 
       // Fetch all contacts
       const allContacts = await this.Contact.findAll({
@@ -444,31 +477,76 @@ class PostgresContactService {
       const unique = [];
 
       for (const contact of allContacts) {
-        // Create a key based on first_name + last_name OR full name, plus company and contact info
         const firstNameKey = (contact.first_name || '').toLowerCase().trim();
         const lastNameKey = (contact.last_name || '').toLowerCase().trim();
         const nameKey = (contact.name || '').toLowerCase().trim();
         const companyKey = (contact.llc_owner || '').toLowerCase().trim();
-        const phoneKey = (contact.phone1 || '').replace(/\D/g, ''); // Remove non-digits
+        const phoneKey = (contact.phone1 || '').replace(/\D/g, '');
         const emailKey = (contact.email1 || '').toLowerCase().trim();
 
-        // Use first_name + last_name combination if available, otherwise fall back to full name
         const personKey = (firstNameKey && lastNameKey)
           ? `${firstNameKey}::${lastNameKey}`
           : nameKey;
 
-        // Create composite key for duplicate detection
-        // This will match people with same first+last name regardless of source document
-        const duplicateKey = `${personKey}|${companyKey}|${phoneKey}|${emailKey}`;
+        let duplicateKey;
+        let matchReason;
 
-        if (!seen.has(duplicateKey) || duplicateKey === '|||' || personKey === '') {
-          // Keep the first occurrence (oldest by created_at) or skip if all fields are empty
-          if (duplicateKey !== '|||' && personKey !== '') {
-            seen.set(duplicateKey, contact.id);
-            unique.push(contact);
-          }
+        // Build duplicate key based on mode
+        switch (mode) {
+          case 'name-only':
+            duplicateKey = personKey;
+            matchReason = 'Same first and last name';
+            break;
+
+          case 'name-company':
+            duplicateKey = `${personKey}|${companyKey}`;
+            matchReason = 'Same name and company';
+            break;
+
+          case 'fuzzy':
+            // For fuzzy mode, we need to check similarity against existing contacts
+            let fuzzyMatch = null;
+            const fuzzyThreshold = 0.9; // 90% similarity
+
+            for (const [key, existingId] of seen.entries()) {
+              const [existingPerson, existingCompany] = key.split('|FUZZY|');
+
+              const nameSimilarity = this.calculateSimilarity(personKey, existingPerson);
+              const companySimilarity = companyKey && existingCompany
+                ? this.calculateSimilarity(companyKey, existingCompany)
+                : 1;
+
+              if (nameSimilarity >= fuzzyThreshold && companySimilarity >= fuzzyThreshold) {
+                fuzzyMatch = { key, id: existingId, nameSim: nameSimilarity, companySim: companySimilarity };
+                break;
+              }
+            }
+
+            if (fuzzyMatch) {
+              duplicateKey = fuzzyMatch.key;
+              matchReason = `Fuzzy match (name: ${(fuzzyMatch.nameSim * 100).toFixed(0)}%, company: ${(fuzzyMatch.companySim * 100).toFixed(0)}%)`;
+            } else {
+              duplicateKey = `${personKey}|FUZZY|${companyKey}`;
+              matchReason = 'Fuzzy match';
+            }
+            break;
+
+          case 'strict':
+          default:
+            duplicateKey = `${personKey}|${companyKey}|${phoneKey}|${emailKey}`;
+            matchReason = 'Exact match on all fields';
+            break;
+        }
+
+        // Skip empty keys
+        if (!duplicateKey || duplicateKey === '' || personKey === '' || duplicateKey.includes('|||')) {
+          continue;
+        }
+
+        if (!seen.has(duplicateKey)) {
+          seen.set(duplicateKey, contact.id);
+          unique.push(contact);
         } else {
-          // Mark as duplicate
           duplicates.push({
             id: contact.id,
             name: contact.name,
@@ -479,7 +557,8 @@ class PostgresContactService {
             email: contact.email1,
             source_file: contact.source_file,
             created_at: contact.created_at,
-            originalId: seen.get(duplicateKey)
+            originalId: seen.get(duplicateKey),
+            matchReason
           });
         }
       }
@@ -488,12 +567,16 @@ class PostgresContactService {
       console.log(`🔄 Found ${duplicates.length} duplicate contacts`);
 
       if (duplicates.length > 0) {
-        console.log('\n📋 Duplicate examples (first 10):');
+        console.log(`\n📋 Duplicate examples (first 10) for mode: ${mode}`);
         duplicates.slice(0, 10).forEach((dup, idx) => {
           const personInfo = dup.first_name && dup.last_name
             ? `${dup.first_name} ${dup.last_name}`
             : dup.name;
-          console.log(`  ${idx + 1}. ID ${dup.id}: ${personInfo || dup.company} from ${dup.source_file || 'unknown'} (original: ${dup.originalId})`);
+          console.log(`  ${idx + 1}. ID ${dup.id}: ${personInfo || dup.company}`);
+          console.log(`      Company: ${dup.company || 'none'}`);
+          console.log(`      Source: ${dup.source_file || 'unknown'}`);
+          console.log(`      Match: ${dup.matchReason}`);
+          console.log(`      Original ID: ${dup.originalId}\n`);
         });
       }
 
@@ -513,31 +596,47 @@ class PostgresContactService {
 
         return {
           success: true,
+          mode,
           totalContacts: allContacts.length,
           uniqueContacts: unique.length,
           duplicatesFound: duplicates.length,
           duplicatesDeleted: deletedCount,
-          dryRun: false
+          dryRun: false,
+          duplicateExamples: duplicates.slice(0, 10)
         };
       }
 
       return {
         success: true,
+        mode,
         totalContacts: allContacts.length,
         uniqueContacts: unique.length,
         duplicatesFound: duplicates.length,
         duplicatesDeleted: 0,
         dryRun: true,
-        message: dryRun ? 'Dry run completed - no records deleted. Set dryRun=false to delete duplicates.' : 'No duplicates found'
+        message: dryRun ? `Dry run completed - found ${duplicates.length} duplicates. Set dryRun=false to delete them.` : 'No duplicates found',
+        duplicateExamples: duplicates.slice(0, 10)
       };
 
     } catch (error) {
       console.error('❌ Deduplication failed:', error.message);
       return {
         success: false,
+        mode,
         error: error.message
       };
     }
+  }
+
+  /**
+   * Deduplicate contacts in the database (backward compatibility)
+   * Finds duplicates based on name, company, phone, and email
+   * Keeps the oldest record (by created_at) and deletes the rest
+   *
+   * This method now uses the new mode-based deduplication with 'strict' mode
+   */
+  async deduplicateContacts(dryRun = true) {
+    return this.deduplicateContactsByMode('strict', dryRun);
   }
 
   /**

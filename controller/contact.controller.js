@@ -347,11 +347,20 @@ class ContactController {
         })
       }
 
-      const { dryRun = 'true' } = req.query
+      const { dryRun = 'true', mode = 'strict' } = req.query
 
-      console.log(`🔄 Deduplication request received (dryRun: ${dryRun})`)
+      // Validate mode
+      const validModes = ['strict', 'name-only', 'name-company', 'fuzzy']
+      if (!validModes.includes(mode)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid mode. Must be one of: ${validModes.join(', ')}`
+        })
+      }
 
-      const result = await this.postgresContactService.deduplicateContacts(dryRun === 'true')
+      console.log(`🔄 Deduplication request received (mode: ${mode}, dryRun: ${dryRun})`)
+
+      const result = await this.postgresContactService.deduplicateContactsByMode(mode, dryRun === 'true')
 
       res.status(200).json(result)
 
