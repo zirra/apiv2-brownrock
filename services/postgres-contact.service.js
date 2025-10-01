@@ -490,7 +490,10 @@ class PostgresContactService {
       if (duplicates.length > 0) {
         console.log('\n📋 Duplicate examples (first 10):');
         duplicates.slice(0, 10).forEach((dup, idx) => {
-          console.log(`  ${idx + 1}. ID ${dup.id}: ${dup.name || dup.company} (original: ${dup.originalId})`);
+          const personInfo = dup.first_name && dup.last_name
+            ? `${dup.first_name} ${dup.last_name}`
+            : dup.name;
+          console.log(`  ${idx + 1}. ID ${dup.id}: ${personInfo || dup.company} from ${dup.source_file || 'unknown'} (original: ${dup.originalId})`);
         });
       }
 
