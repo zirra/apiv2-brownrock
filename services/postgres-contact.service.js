@@ -424,6 +424,109 @@ class PostgresContactService {
   }
 
   /**
+   * Deduplicate contacts in the database
+   * Finds duplicates based on name, company, phone, and email
+   * Keeps the oldest record (by created_at) and deletes the rest
+   */
+  async deduplicateContacts(dryRun = true) {
+    try {
+      console.log(`🔍 Starting deduplication process (dryRun: ${dryRun})...`);
+
+      // Fetch all contacts
+      const allContacts = await this.Contact.findAll({
+        order: [['created_at', 'ASC']]
+      });
+
+      console.log(`📊 Found ${allContacts.length} total contacts`);
+
+      const seen = new Map();
+      const duplicates = [];
+      const unique = [];
+
+      for (const contact of allContacts) {
+        // Create a key based on name/company and primary contact info
+        const nameKey = (contact.name || '').toLowerCase().trim();
+        const companyKey = (contact.llc_owner || '').toLowerCase().trim();
+        const phoneKey = (contact.phone1 || '').replace(/\D/g, ''); // Remove non-digits
+        const emailKey = (contact.email1 || '').toLowerCase().trim();
+
+        // Create composite key for duplicate detection
+        const duplicateKey = `${nameKey}|${companyKey}|${phoneKey}|${emailKey}`;
+
+        if (!seen.has(duplicateKey) || duplicateKey === '|||') {
+          // Keep the first occurrence (oldest by created_at) or skip if all fields are empty
+          if (duplicateKey !== '|||') {
+            seen.set(duplicateKey, contact.id);
+            unique.push(contact);
+          }
+        } else {
+          // Mark as duplicate
+          duplicates.push({
+            id: contact.id,
+            name: contact.name,
+            company: contact.llc_owner,
+            phone: contact.phone1,
+            email: contact.email1,
+            created_at: contact.created_at,
+            originalId: seen.get(duplicateKey)
+          });
+        }
+      }
+
+      console.log(`✅ Found ${unique.length} unique contacts`);
+      console.log(`🔄 Found ${duplicates.length} duplicate contacts`);
+
+      if (duplicates.length > 0) {
+        console.log('\n📋 Duplicate examples (first 10):');
+        duplicates.slice(0, 10).forEach((dup, idx) => {
+          console.log(`  ${idx + 1}. ID ${dup.id}: ${dup.name || dup.company} (original: ${dup.originalId})`);
+        });
+      }
+
+      if (!dryRun && duplicates.length > 0) {
+        console.log('\n🗑️ Deleting duplicates...');
+        const duplicateIds = duplicates.map(d => d.id);
+
+        const deletedCount = await this.Contact.destroy({
+          where: {
+            id: {
+              [this.sequelize.Sequelize.Op.in]: duplicateIds
+            }
+          }
+        });
+
+        console.log(`✅ Deleted ${deletedCount} duplicate contacts`);
+
+        return {
+          success: true,
+          totalContacts: allContacts.length,
+          uniqueContacts: unique.length,
+          duplicatesFound: duplicates.length,
+          duplicatesDeleted: deletedCount,
+          dryRun: false
+        };
+      }
+
+      return {
+        success: true,
+        totalContacts: allContacts.length,
+        uniqueContacts: unique.length,
+        duplicatesFound: duplicates.length,
+        duplicatesDeleted: 0,
+        dryRun: true,
+        message: dryRun ? 'Dry run completed - no records deleted. Set dryRun=false to delete duplicates.' : 'No duplicates found'
+      };
+
+    } catch (error) {
+      console.error('❌ Deduplication failed:', error.message);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
    * Test database connection and model
    */
   async testConnection() {

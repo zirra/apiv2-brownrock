@@ -335,6 +335,33 @@ class ContactController {
       timestamp: new Date().toISOString()
     })
   }
+
+  async deduplicatePostgresContacts(req, res) {
+    try {
+      // Check if service exists
+      if (!this.postgresContactService) {
+        return res.status(500).json({
+          success: false,
+          message: 'PostgresContactService not initialized'
+        })
+      }
+
+      const { dryRun = 'true' } = req.query
+
+      console.log(`🔄 Deduplication request received (dryRun: ${dryRun})`)
+
+      const result = await this.postgresContactService.deduplicateContacts(dryRun === 'true')
+
+      res.status(200).json(result)
+
+    } catch (error) {
+      console.error('Error deduplicating contacts:', error.message)
+      res.status(500).json({
+        success: false,
+        message: `Deduplication failed: ${error.message}`
+      })
+    }
+  }
 }
 
 // Create single instance
@@ -353,6 +380,7 @@ module.exports.controller = (app) => {
   // PostgreSQL contact management endpoints
   app.get('/v1/postgres/contacts', (req, res) => contactController.getPostgresContacts(req, res))
   app.get('/v1/postgres/contacts/stats', (req, res) => contactController.getPostgresContactStats(req, res))
+  app.post('/v1/postgres/contacts/deduplicate', (req, res) => contactController.deduplicatePostgresContacts(req, res))
 
   // Debug endpoints
   app.get('/v1/test-dynamo', (req, res) => contactController.testDynamoClient(req, res))
