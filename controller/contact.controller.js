@@ -1,5 +1,6 @@
 require('dotenv').config()
 const fs = require('fs')
+//const authenticateJWT = require('../config/authenticate.cjs')
 
 // Import services
 const AuthService = require('../services/auth.service.js')
