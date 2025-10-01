@@ -444,18 +444,26 @@ class PostgresContactService {
       const unique = [];
 
       for (const contact of allContacts) {
-        // Create a key based on name/company and primary contact info
+        // Create a key based on first_name + last_name OR full name, plus company and contact info
+        const firstNameKey = (contact.first_name || '').toLowerCase().trim();
+        const lastNameKey = (contact.last_name || '').toLowerCase().trim();
         const nameKey = (contact.name || '').toLowerCase().trim();
         const companyKey = (contact.llc_owner || '').toLowerCase().trim();
         const phoneKey = (contact.phone1 || '').replace(/\D/g, ''); // Remove non-digits
         const emailKey = (contact.email1 || '').toLowerCase().trim();
 
-        // Create composite key for duplicate detection
-        const duplicateKey = `${nameKey}|${companyKey}|${phoneKey}|${emailKey}`;
+        // Use first_name + last_name combination if available, otherwise fall back to full name
+        const personKey = (firstNameKey && lastNameKey)
+          ? `${firstNameKey}::${lastNameKey}`
+          : nameKey;
 
-        if (!seen.has(duplicateKey) || duplicateKey === '|||') {
+        // Create composite key for duplicate detection
+        // This will match people with same first+last name regardless of source document
+        const duplicateKey = `${personKey}|${companyKey}|${phoneKey}|${emailKey}`;
+
+        if (!seen.has(duplicateKey) || duplicateKey === '|||' || personKey === '') {
           // Keep the first occurrence (oldest by created_at) or skip if all fields are empty
-          if (duplicateKey !== '|||') {
+          if (duplicateKey !== '|||' && personKey !== '') {
             seen.set(duplicateKey, contact.id);
             unique.push(contact);
           }
@@ -464,9 +472,12 @@ class PostgresContactService {
           duplicates.push({
             id: contact.id,
             name: contact.name,
+            first_name: contact.first_name,
+            last_name: contact.last_name,
             company: contact.llc_owner,
             phone: contact.phone1,
             email: contact.email1,
+            source_file: contact.source_file,
             created_at: contact.created_at,
             originalId: seen.get(duplicateKey)
           });
