@@ -38,7 +38,7 @@ class OCRController {
 
     // Initialize cron job if enabled
     if (this.config.enabled) {
-      this.initializeCronJob()
+      //this.initializeCronJob()
     }
   }
 

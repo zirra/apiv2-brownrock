@@ -1,17 +1,17 @@
 require('dotenv').config()
 const cron = require('node-cron')
-const fs = require('fs')
-const path = require('path')
-const { execSync } = require('child_process')
 
 // Import services
 const AuthService = require('../services/auth.service.js')
 const S3Service = require('../services/s3.service.js')
 const LoggingService = require('../services/logging.service.js')
 const DataService = require('../services/data.service.js')
-const ContactService = require('../services/contact.service.js')
-const PostgresContactService = require('../services/postgres-contact.service.js')
 const PDFService = require('../services/pdf.service.js')
+
+// Import other controllers
+const { Controller: PdfControllerModule } = require('./pdf.controller.js')
+const { Controller: ContactControllerModule } = require('./contact.controller.js')
+const { Controller: S3AnalysisControllerModule } = require('./s3-analysis.controller.js')
 
 class EmnrdController {
   constructor() {
@@ -20,642 +20,33 @@ class EmnrdController {
     this.authService = new AuthService()
     this.s3Service = new S3Service(this.authService, this.loggingService)
     this.dataService = new DataService(this.authService, this.loggingService)
-    this.contactService = new ContactService(this.authService, this.s3Service)
-    this.postgresContactService = new PostgresContactService()
     this.pdfService = new PDFService(this.authService, this.s3Service, this.loggingService)
+
+    // Reference to other controllers
+    this.pdfController = PdfControllerModule.PdfController
+    this.contactController = ContactControllerModule.ContactController
+    this.s3AnalysisController = S3AnalysisControllerModule.S3AnalysisController
 
     // State
     this.filesToProcess = []
     this.appScheduleRunning = false
 
-    // S3 Analysis Job State
-    this.s3AnalysisRunning = false
-    this.s3AnalysisConfig = {
-      sourceBucket: process.env.S3_ANALYSIS_BUCKET || 'ocdpdfs',
-      sourceFolder: process.env.S3_ANALYSIS_FOLDER || 'analysis-pdfs',
-      enabled: process.env.S3_ANALYSIS_ENABLED === 'true',
-      schedule: process.env.S3_ANALYSIS_SCHEDULE || '0 2 * * 1', // Mondays at 2 AM
-    }
-    
     // Configuration for local processing
     this.config = {
-      localDownloadPath: process.env.LOCAL_PDF_PATH || './downloads/pdfs',
-      useGhostscript: process.env.USE_GHOSTSCRIPT === 'true',
-      ghostscriptQuality: process.env.GS_QUALITY || 'ebook',
       maxFileSize: parseInt(process.env.MAX_FILE_SIZE) || 500000,
       processLocally: process.env.PROCESS_LOCALLY === 'true',
-      useTextract: process.env.USE_TEXTRACT === 'true',
-      extractText: process.env.EXTRACT_TEXT === 'true',
-      textExtractionMethod: process.env.TEXT_EXTRACTION_METHOD || 'smart',
-      smartProcessing: process.env.SMART_PROCESSING !== 'false'
     }
-    
-    // Initialize Textract client if needed
-    this.textractClient = null
-    this.processingResults = []
-    
-    // Ensure local directory exists
-    this.ensureLocalDirectory()
-    
+
     // Initialize cron job
     this.initializeCronJob()
   }
 
-  // Utility Methods
-  ensureLocalDirectory() {
-    if (!fs.existsSync(this.config.localDownloadPath)) {
-      fs.mkdirSync(this.config.localDownloadPath, { recursive: true })
-      console.log(`📁 Created local download directory: ${this.config.localDownloadPath}`)
-    }
-  }
-
-  async downloadPdfLocally(url, filename, applicant) {
-    const applicantDir = path.join(this.config.localDownloadPath, applicant)
-    
-    if (!fs.existsSync(applicantDir)) {
-      fs.mkdirSync(applicantDir, { recursive: true })
-    }
-
-    const localPath = path.join(applicantDir, filename)
-    
-    try {
-      console.log(`🔐 Downloading ${filename} with authentication...`)
-      
-      const token = this.authService.getToken()
-      if (!token) {
-        await this.authService.login()
-      }
-      
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${this.authService.getToken()}`,
-          'Accept': 'application/pdf, */*',
-          'User-Agent': 'Mozilla/5.0 (compatible; PDF-Downloader/1.0)'
-        },
-        redirect: 'follow'
-      })
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status} - ${response.statusText}`)
-      }
-      
-      const contentType = response.headers.get('content-type')
-      console.log(`📄 Content-Type: ${contentType}`)
-      
-      if (contentType && !contentType.includes('pdf') && !contentType.includes('octet-stream')) {
-        const text = await response.text()
-        console.warn(`⚠️ Unexpected content type for ${filename}: ${contentType}`)
-        console.warn(`First 500 chars: ${text.substring(0, 500)}...`)
-        throw new Error(`Expected PDF but got ${contentType}`)
-      }
-      
-      const buffer = await response.arrayBuffer()
-      const pdfBuffer = Buffer.from(buffer)
-      
-      if (!pdfBuffer.toString('ascii', 0, 4).includes('%PDF')) {
-        const preview = pdfBuffer.toString('utf8', 0, Math.min(500, pdfBuffer.length))
-        console.warn(`⚠️ File ${filename} doesn't appear to be a PDF`)
-        console.warn(`Content preview: ${preview}`)
-        
-        const debugPath = localPath.replace('.pdf', '.debug.html')
-        fs.writeFileSync(debugPath, pdfBuffer)
-        console.log(`🐛 Saved debug file: ${debugPath}`)
-        
-        throw new Error(`Downloaded content is not a valid PDF`)
-      }
-      
-      fs.writeFileSync(localPath, pdfBuffer)
-      
-      const stats = fs.statSync(localPath)
-      console.log(`⬇️ Downloaded ${filename} locally (${stats.size} bytes)`)
-      return localPath
-      
-    } catch (error) {
-      console.error(`❌ Failed to download ${filename}: ${error.message}`)
-      
-      try {
-        console.log(`🔄 Attempting S3-based download method for ${filename}...`)
-        await this.downloadPdfWithS3Method(url, localPath)
-        return localPath
-      } catch (altError) {
-        console.error(`❌ S3-based download also failed: ${altError.message}`)
-        throw new Error(`Both download methods failed: ${error.message} | ${altError.message}`)
-      }
-    }
-  }
-
-  async downloadPdfWithS3Method(url, localPath) {
-    try {
-      console.log(`🔄 Using S3Service download method...`)
-      
-      const tempS3Key = `temp/${Date.now()}-${path.basename(localPath)}`
-      
-      await this.s3Service.uploadToS3(url, tempS3Key)
-      
-      const s3Object = await this.s3Service.getObject(tempS3Key)
-      const buffer = await s3Object.Body.transformToByteArray()
-      
-      fs.writeFileSync(localPath, Buffer.from(buffer))
-      
-      await this.s3Service.deleteObject(tempS3Key)
-      
-      console.log(`✅ Downloaded via S3 method: ${path.basename(localPath)}`)
-      return localPath
-      
-    } catch (error) {
-      console.error(`❌ S3 method download failed: ${error.message}`)
-      throw error
-    }
-  }
-
-  async optimizePdfWithGhostscript(inputPath, outputPath = null) {
-    if (!this.config.useGhostscript) {
-      return { optimizedPath: inputPath, wasOptimized: false }
-    }
-
-    const output = outputPath || inputPath.replace('.pdf', '_optimized.pdf')
-    
-    try {
-      execSync('gs --version', { stdio: 'ignore' })
-      
-      const gsCommand = [
-        'gs',
-        '-sDEVICE=pdfwrite',
-        '-dCompatibilityLevel=1.4',
-        `-dPDFSETTINGS=/${this.config.ghostscriptQuality}`,
-        '-dNOPAUSE',
-        '-dQUIET',
-        '-dBATCH',
-        '-dAutoRotatePages=/None',
-        '-dColorImageResolution=300',
-        '-dGrayImageResolution=300',
-        '-dMonoImageResolution=600',
-        '-dPreserveAnnots=true',
-        '-dPreserveMarkedContent=true',
-        `-sOutputFile="${output}"`,
-        `"${inputPath}"`
-      ].join(' ')
-      
-      console.log(`🔧 Optimizing PDF with Ghostscript: ${path.basename(inputPath)}`)
-      execSync(gsCommand)
-      
-      const originalStats = fs.statSync(inputPath)
-      const optimizedStats = fs.statSync(output)
-      
-      if (optimizedStats.size < originalStats.size) {
-        console.log(`✅ PDF optimized: ${originalStats.size} → ${optimizedStats.size} bytes (${Math.round((1 - optimizedStats.size/originalStats.size) * 100)}% reduction)`)
-        
-        if (!outputPath) {
-          fs.unlinkSync(inputPath)
-          fs.renameSync(output, inputPath)
-          return { optimizedPath: inputPath, wasOptimized: true, originalSize: originalStats.size, newSize: optimizedStats.size }
-        }
-        return { optimizedPath: output, wasOptimized: true, originalSize: originalStats.size, newSize: optimizedStats.size }
-      } else {
-        console.log(`⚠️ Optimization didn't reduce size, keeping original`)
-        if (!outputPath) {
-          fs.unlinkSync(output)
-        }
-        return { optimizedPath: inputPath, wasOptimized: false, originalSize: originalStats.size, newSize: originalStats.size }
-      }
-      
-    } catch (error) {
-      console.warn(`⚠️ Ghostscript optimization failed: ${error.message}`)
-      if (fs.existsSync(output) && !outputPath) {
-        fs.unlinkSync(output)
-      }
-      return { optimizedPath: inputPath, wasOptimized: false, error: error.message }
-    }
-  }
-
-  async extractTextFromPdf(pdfPath) {
-    try {
-      const pdfParse = require('pdf-parse')
-      const dataBuffer = fs.readFileSync(pdfPath)
-      const data = await pdfParse(dataBuffer)
-      
-      const meaningfulText = data.text.replace(/\s+/g, ' ').trim()
-      
-      if (meaningfulText.length < 50) {
-        console.log(`📷 PDF has minimal text (${meaningfulText.length} chars) - likely image-based`)
-        return { 
-          extractedText: meaningfulText, 
-          textLength: meaningfulText.length,
-          numPages: data.numpages,
-          isImageBased: true 
-        }
-      }
-      
-      console.log(`📝 Extracted ${meaningfulText.length} characters from PDF (${data.numpages} pages)`)
-      return { 
-        extractedText: meaningfulText, 
-        textLength: meaningfulText.length,
-        numPages: data.numpages,
-        isImageBased: false 
-      }
-      
-    } catch (error) {
-      console.warn(`⚠️ PDF text extraction failed: ${error.message}`)
-      return { extractedText: '', textLength: 0, numPages: 0, isImageBased: true, error: error.message }
-    }
-  }
-
-  async extractTextWithTextract(pdfPath, s3Key) {
-    try {
-      if (!this.textractClient) {
-        const { TextractClient } = require('@aws-sdk/client-textract')
-        this.textractClient = new TextractClient({ 
-          region: process.env.AWS_REGION || 'us-east-1',
-          credentials: this.authService.getAWSCredentials ? this.authService.getAWSCredentials() : undefined
-        })
-      }
-
-      const { AnalyzeDocumentCommand } = require('@aws-sdk/client-textract')
-      
-      console.log(`🔍 Starting Textract analysis for ${path.basename(pdfPath)}`)
-      
-      // First, ensure the PDF is uploaded to S3 for Textract to access
-      console.log(`☁️ Uploading ${path.basename(pdfPath)} to S3 for Textract analysis...`)
-      await this.uploadOptimizedToS3(pdfPath, s3Key)
-      
-      const command = new AnalyzeDocumentCommand({
-        Document: {
-          S3Object: {
-            Bucket: process.env.S3_BUCKET_NAME,
-            Name: s3Key
-          }
-        },
-        FeatureTypes: ['TABLES', 'FORMS', 'LAYOUT']
-      })
-      
-      const response = await this.textractClient.send(command)
-      
-      let extractedText = ''
-      let tables = []
-      let forms = []
-      
-      for (const block of response.Blocks) {
-        if (block.BlockType === 'LINE') {
-          extractedText += block.Text + '\n'
-        } else if (block.BlockType === 'TABLE') {
-          tables.push(this.processTextractTable(block, response.Blocks))
-        } else if (block.BlockType === 'KEY_VALUE_SET') {
-          forms.push(this.processTextractForm(block, response.Blocks))
-        }
-      }
-      
-      const baseName = pdfPath.replace('.pdf', '')
-      const textPath = baseName + '_textract.txt'
-      fs.writeFileSync(textPath, extractedText)
-      
-      if (tables.length > 0 || forms.length > 0) {
-        const structuredPath = baseName + '_structured.json'
-        fs.writeFileSync(structuredPath, JSON.stringify({ tables, forms }, null, 2))
-        console.log(`📊 Extracted ${tables.length} tables and ${forms.length} form fields`)
-      }
-      
-      console.log(`📝 Textract extracted ${extractedText.length} characters`)
-      return { 
-        extractedText, 
-        textLength: extractedText.length,
-        textPath,
-        tables,
-        forms,
-        confidence: 'high',
-        method: 'textract',
-        uploadedToS3: true
-      }
-      
-    } catch (error) {
-      console.warn(`⚠️ Textract failed: ${error.message}`)
-      return { 
-        extractedText: '', 
-        textLength: 0,
-        textPath: null, 
-        confidence: 'failed', 
-        error: error.message,
-        method: 'textract',
-        uploadedToS3: false
-      }
-    }
-  }
-
-  processTextractTable(tableBlock, allBlocks) {
-    const table = { rows: [] }
-    
-    if (tableBlock.Relationships) {
-      const cellIds = tableBlock.Relationships
-        .find(rel => rel.Type === 'CHILD')?.Ids || []
-      
-      table.cellCount = cellIds.length
-      table.id = tableBlock.Id
-    }
-    
-    return table
-  }
-
-  processTextractForm(formBlock, allBlocks) {
-    const form = {}
-    
-    if (formBlock.EntityTypes && formBlock.EntityTypes.includes('KEY')) {
-      form.type = 'key'
-      form.id = formBlock.Id
-      form.text = formBlock.Text || ''
-    }
-    
-    return form
-  }
-
-  async analyzePdfContent(pdfPath) {
-    try {
-      const pdfParse = require('pdf-parse')
-      const dataBuffer = fs.readFileSync(pdfPath)
-      const data = await pdfParse(dataBuffer)
-      
-      const meaningfulText = data.text.replace(/\s+/g, ' ').trim()
-      const textLength = meaningfulText.length
-      const numPages = data.numpages
-      const avgTextPerPage = textLength / Math.max(numPages, 1)
-      
-      const fileStats = fs.statSync(pdfPath)
-      const fileSizeKB = fileStats.size / 1024
-      const textDensity = Math.round((textLength / fileSizeKB) * 10) / 10
-      
-      let type = 'unknown'
-      let recommendation = 'ghostscript-only'
-      let hasImages = false
-      
-      if (avgTextPerPage > 500 && textDensity > 50) {
-        type = 'text-based'
-        recommendation = 'ghostscript-only'
-        hasImages = false
-      } else if (avgTextPerPage < 50 && textDensity < 10) {
-        type = 'image-based'
-        recommendation = 'textract'
-        hasImages = true
-      } else if (fileSizeKB > 1000 && textDensity < 30) {
-        type = 'mixed'
-        recommendation = 'both'
-        hasImages = true
-      } else {
-        type = 'mixed'
-        recommendation = 'both'
-        hasImages = textDensity < 40
-      }
-      
-      return {
-        type,
-        recommendation,
-        hasImages,
-        textLength,
-        numPages,
-        avgTextPerPage: Math.round(avgTextPerPage),
-        fileSizeKB: Math.round(fileSizeKB),
-        textDensity: Math.round(textDensity)
-      }
-      
-    } catch (error) {
-      console.warn(`⚠️ PDF content analysis failed: ${error.message}`)
-      return {
-        type: 'unknown',
-        recommendation: 'both',
-        hasImages: true,
-        textLength: 0,
-        numPages: 0,
-        avgTextPerPage: 0,
-        fileSizeKB: 0,
-        textDensity: 0,
-        error: error.message
-      }
-    }
-  }
-
-  async smartOptimizeAndExtract(inputPath, s3Key = null) {
-    const results = {
-      originalPath: inputPath,
-      optimizedPath: inputPath,
-      wasOptimized: false,
-      textExtracted: false,
-      extractedText: '',
-      textLength: 0,
-      method: 'none',
-      contentType: 'unknown',
-      processingSteps: []
-    }
-
-    try {
-      console.log(`🧠 Smart processing: ${path.basename(inputPath)}`)
-      
-      console.log(`🔍 Step 1: Analyzing PDF content type`)
-      const contentAnalysis = await this.analyzePdfContent(inputPath)
-      results.contentType = contentAnalysis.type
-      results.processingSteps.push(`Analysis: ${contentAnalysis.type}`)
-      
-      console.log(`📊 PDF Analysis Results:`)
-      console.log(`   - Content Type: ${contentAnalysis.type}`)
-      console.log(`   - Text Density: ${contentAnalysis.textDensity}%`)
-      console.log(`   - Has Images: ${contentAnalysis.hasImages}`)
-      console.log(`   - Recommendation: ${contentAnalysis.recommendation}`)
-
-      if (contentAnalysis.type === 'text-based' || contentAnalysis.recommendation === 'ghostscript-only') {
-        console.log(`📝 Step 2: Text-based processing (Ghostscript + basic extraction)`)
-        
-        const optimizationResult = await this.optimizePdfWithGhostscript(inputPath)
-        results.optimizedPath = optimizationResult.optimizedPath
-        results.wasOptimized = optimizationResult.wasOptimized
-        results.processingSteps.push(`Ghostscript: ${optimizationResult.wasOptimized ? 'optimized' : 'skipped'}`)
-        
-        const textResult = await this.extractTextFromPdf(results.optimizedPath)
-        results.extractedText = textResult.extractedText
-        results.textLength = textResult.textLength
-        results.method = 'ghostscript-basic'
-        results.textExtracted = textResult.textLength > 0
-        results.processingSteps.push(`Basic extraction: ${textResult.textLength} chars`)
-        
-      } else if (contentAnalysis.type === 'image-based' || contentAnalysis.recommendation === 'textract') {
-        console.log(`📷 Step 2: Image-based processing (Textract OCR only)`)
-        
-        results.optimizedPath = inputPath
-        results.wasOptimized = false
-        results.processingSteps.push('Ghostscript: skipped (image-heavy)')
-        
-        if (this.config.useTextract && s3Key) {
-          const textractResult = await this.extractTextWithTextract(inputPath, s3Key)
-          results.extractedText = textractResult.extractedText
-          results.textLength = textractResult.textLength
-          results.method = 'textract-only'
-          results.textExtracted = textractResult.textLength > 0
-          results.tables = textractResult.tables
-          results.forms = textractResult.forms
-          results.uploadedToS3 = textractResult.uploadedToS3
-          results.processingSteps.push(`Textract: ${textractResult.textLength} chars, ${textractResult.tables?.length || 0} tables`)
-        } else {
-          results.method = 'skipped'
-          results.processingSteps.push('Textract: not configured')
-        }
-        
-      } else {
-        console.log(`🔀 Step 2: Mixed content processing (Ghostscript + Textract)`)
-        
-        const optimizationResult = await this.optimizePdfWithGhostscript(inputPath)
-        results.optimizedPath = optimizationResult.optimizedPath
-        results.wasOptimized = optimizationResult.wasOptimized
-        results.processingSteps.push(`Ghostscript: ${optimizationResult.wasOptimized ? 'optimized' : 'skipped'}`)
-        
-        const basicTextResult = await this.extractTextFromPdf(results.optimizedPath)
-        
-        if (basicTextResult.textLength < 100 && this.config.useTextract && s3Key) {
-          const textractResult = await this.extractTextWithTextract(results.optimizedPath, s3Key)
-          if (textractResult.textLength > basicTextResult.textLength) {
-            results.extractedText = textractResult.extractedText
-            results.textLength = textractResult.textLength
-            results.method = 'ghostscript-textract'
-            results.tables = textractResult.tables
-            results.forms = textractResult.forms
-            results.uploadedToS3 = textractResult.uploadedToS3
-            results.processingSteps.push(`Textract: ${textractResult.textLength} chars (better than basic)`)
-          } else {
-            results.extractedText = basicTextResult.extractedText
-            results.textLength = basicTextResult.textLength
-            results.method = 'ghostscript-basic'
-            results.processingSteps.push(`Basic: ${basicTextResult.textLength} chars (sufficient)`)
-          }
-        } else {
-          results.extractedText = basicTextResult.extractedText
-          results.textLength = basicTextResult.textLength
-          results.method = 'ghostscript-basic'
-          results.processingSteps.push(`Basic: ${basicTextResult.textLength} chars`)
-        }
-        
-        results.textExtracted = results.textLength > 0
-      }
-      
-      if (results.textExtracted && results.extractedText) {
-        const textPath = results.optimizedPath.replace('.pdf', `_${results.method}.txt`)
-        fs.writeFileSync(textPath, results.extractedText)
-        results.textPath = textPath
-      }
-      
-      console.log(`✅ Smart processing complete: ${results.processingSteps.join(' → ')}`)
-      return results
-      
-    } catch (error) {
-      console.error(`❌ Smart processing failed: ${error.message}`)
-      results.error = error.message
-      return results
-    }
-  }
-
-  async optimizeAndExtractText(inputPath, s3Key = null) {
-    const results = {
-      originalPath: inputPath,
-      optimizedPath: inputPath,
-      wasOptimized: false,
-      textExtracted: false,
-      extractedText: '',
-      textLength: 0,
-      method: 'none',
-      processingSteps: []
-    }
-
-    try {
-      console.log(`📄 Starting combined processing: ${path.basename(inputPath)}`)
-      
-      console.log(`🔧 Step 1: Ghostscript optimization`)
-      const optimizationResult = await this.optimizePdfWithGhostscript(inputPath)
-      results.optimizedPath = optimizationResult.optimizedPath
-      results.wasOptimized = optimizationResult.wasOptimized
-      results.originalSize = optimizationResult.originalSize
-      results.newSize = optimizationResult.newSize
-      results.processingSteps.push(`Ghostscript: ${optimizationResult.wasOptimized ? 'optimized' : 'skipped'}`)
-      
-      console.log(`📝 Step 2: Basic text extraction`)
-      const basicTextResult = await this.extractTextFromPdf(results.optimizedPath)
-      results.processingSteps.push(`Basic extraction: ${basicTextResult.textLength} chars`)
-      
-      if (basicTextResult.isImageBased || basicTextResult.textLength < 100) {
-        console.log(`🔍 Step 3: Advanced text extraction (document appears image-based)`)
-        
-        if (this.config.useTextract && s3Key) {
-          const textractResult = await this.extractTextWithTextract(results.optimizedPath, s3Key)
-          if (textractResult.textLength > basicTextResult.textLength) {
-            results.extractedText = textractResult.extractedText
-            results.textLength = textractResult.textLength
-            results.method = 'textract'
-            results.tables = textractResult.tables
-            results.forms = textractResult.forms
-            results.textExtracted = true
-            results.uploadedToS3 = textractResult.uploadedToS3
-            results.processingSteps.push(`Textract: ${textractResult.textLength} chars, ${textractResult.tables?.length || 0} tables`)
-          }
-        } else {
-          results.extractedText = basicTextResult.extractedText
-          results.textLength = basicTextResult.textLength
-          results.method = 'basic'
-          results.textExtracted = basicTextResult.textLength > 0
-        }
-      } else {
-        results.extractedText = basicTextResult.extractedText
-        results.textLength = basicTextResult.textLength
-        results.method = 'basic'
-        results.textExtracted = true
-        results.processingSteps.push('Used basic extraction (sufficient text found)')
-      }
-      
-      if (results.textExtracted && results.extractedText) {
-        const textPath = results.optimizedPath.replace('.pdf', '_extracted.txt')
-        fs.writeFileSync(textPath, results.extractedText)
-        results.textPath = textPath
-      }
-      
-      console.log(`✅ Processing complete: ${results.processingSteps.join(', ')}`)
-      return results
-      
-    } catch (error) {
-      console.error(`❌ Combined processing failed: ${error.message}`)
-      results.error = error.message
-      return results
-    }
-  }
-
-  async uploadOptimizedToS3(localPath, s3Key) {
-    try {
-      const fileBuffer = fs.readFileSync(localPath)
-      
-      if (this.s3Service.uploadBufferToS3) {
-        await this.s3Service.uploadBufferToS3(fileBuffer, s3Key)
-      } else {
-        const tempPath = localPath + '.temp'
-        fs.copyFileSync(localPath, tempPath)
-        await this.s3Service.uploadFileToS3(tempPath, s3Key)
-        fs.unlinkSync(tempPath)
-      }
-      
-      console.log(`☁️ Uploaded optimized PDF to S3: ${s3Key}`)
-    } catch (error) {
-      console.error(`❌ Failed to upload to S3: ${error.message}`)
-      throw error
-    }
-  }
-
-  async cleanupLocalFile(filePath) {
-    try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath)
-        console.log(`🗑️ Cleaned up local file: ${path.basename(filePath)}`)
-      }
-    } catch (error) {
-      console.warn(`⚠️ Failed to cleanup ${filePath}: ${error.message}`)
-    }
-  }
-
-  // Enhanced HTTP Route Handlers
+  // Main workflow - processes PDFs from applicants
   async test(req, res) {
     try {
       this.appScheduleRunning = true
       const applicantNames = this.dataService.getApplicantNames()
-      
+
       for (let j = 0; j < applicantNames.length; j++) {
         const applicant = applicantNames[j]
         console.log(`🔍 Processing applicant: ${applicant}`)
@@ -685,47 +76,47 @@ class EmnrdController {
         for (let i = 0; i < allPdfs.length; i++) {
           const pdf = allPdfs[i]
           const s3Key = `pdfs/${applicant}/${pdf.FileName}`
-          
+
           if (pdf.FileSize <= this.config.maxFileSize) {
             try {
               this.filesToProcess.push(s3Key)
-              
+
               if (this.config.processLocally) {
                 console.log(`⬇️ Downloading ${pdf.FileName} locally for processing...`)
-                const localPath = await this.downloadPdfLocally(pdf.Url, pdf.FileName, applicant)
-                
-                const processingResult = this.config.smartProcessing ? 
-                  await this.smartOptimizeAndExtract(localPath, s3Key) :
-                  await this.optimizeAndExtractText(localPath, s3Key)
-                
+                const localPath = await this.pdfController.downloadPdfLocally(pdf.Url, pdf.FileName, applicant)
+
+                const processingResult = this.pdfController.config.smartProcessing ?
+                  await this.pdfController.smartOptimizeAndExtract(localPath, s3Key) :
+                  await this.pdfController.optimizeAndExtractText(localPath, s3Key)
+
                 // Upload to S3 only if not already uploaded by Textract
                 if (!processingResult.uploadedToS3) {
                   console.log(`☁️ Uploading processed ${pdf.FileName} to S3...`)
-                  await this.uploadOptimizedToS3(processingResult.optimizedPath, s3Key)
+                  await this.pdfController.uploadOptimizedToS3(processingResult.optimizedPath, s3Key)
                 } else {
                   console.log(`✅ ${pdf.FileName} already uploaded to S3 by Textract`)
                 }
-                
+
                 console.log(`📊 Processing summary for ${pdf.FileName}:`)
                 console.log(`   - Optimization: ${processingResult.wasOptimized ? 'Yes' : 'No'}`)
                 console.log(`   - Text extracted: ${processingResult.textLength} characters`)
                 console.log(`   - Method: ${processingResult.method}`)
                 console.log(`   - Steps: ${processingResult.processingSteps.join(' → ')}`)
-                
+
                 if (!process.env.KEEP_LOCAL_FILES) {
-                  await this.cleanupLocalFile(localPath)
+                  await this.pdfController.cleanupLocalFile(localPath)
                   if (processingResult.optimizedPath !== localPath) {
-                    await this.cleanupLocalFile(processingResult.optimizedPath)
+                    await this.pdfController.cleanupLocalFile(processingResult.optimizedPath)
                   }
                   if (processingResult.textPath) {
-                    await this.cleanupLocalFile(processingResult.textPath)
+                    await this.pdfController.cleanupLocalFile(processingResult.textPath)
                   }
                 }
-                
+
                 console.log(`✅ Locally processed and uploaded: ${pdf.FileName}`)
-                
-                this.processingResults = this.processingResults || []
-                this.processingResults.push({
+
+                this.pdfController.processingResults = this.pdfController.processingResults || []
+                this.pdfController.processingResults.push({
                   filename: pdf.FileName,
                   applicant: applicant,
                   s3Key: s3Key,
@@ -736,14 +127,14 @@ class EmnrdController {
                 await this.s3Service.uploadToS3(pdf.Url, s3Key)
                 console.log(`✅ Directly uploaded: ${pdf.FileName}`)
               }
-              
+
             } catch (processErr) {
               console.error(`❌ Processing failed for ${pdf.FileName}: ${processErr.message}`)
               await this.loggingService.writeMessage('processingFail', `${processErr.message} ${pdf.FileName}`)
             }
 
             // Add small delay between files to avoid Claude rate limits
-            if (i < allPdfs.length - 1) { // Don't delay after the last file
+            if (i < allPdfs.length - 1) {
               console.log(`⏸️ Waiting 3 seconds before next file to avoid rate limits...`)
               await new Promise(resolve => setTimeout(resolve, 3000))
             }
@@ -754,13 +145,13 @@ class EmnrdController {
       }
 
       this.appScheduleRunning = false
-      
+
       if (res) {
-        return res.status(200).send({ 
+        return res.status(200).send({
           message: 'PDF processing completed successfully.',
           processedLocally: this.config.processLocally,
-          ghostscriptEnabled: this.config.useGhostscript,
-          smartProcessing: this.config.smartProcessing,
+          ghostscriptEnabled: this.pdfController.config.useGhostscript,
+          smartProcessing: this.pdfController.config.smartProcessing,
           filesProcessed: this.filesToProcess.length
         })
       }
@@ -779,460 +170,12 @@ class EmnrdController {
     }
   }
 
-  async processList(req, res) {
-    try {
-      const folder = (req.query.folder || 'pdfs').replace(/\/?$/, '/')
-      const results = await this.s3Service.listFiles(folder)
-      res.status(200).send('ok')
-    } catch (err) {
-      console.error("Error listing files:", err)
-      await this.loggingService.writeMessage('s3Error', err)
-      return res.status(500).send(err)
-    }
-  }
-
   getStatus(req, res) {
     res.status(200).send({
       running: this.appScheduleRunning,
-      config: this.config
+      config: this.config,
+      s3AnalysisRunning: this.s3AnalysisController.isRunning()
     })
-  }
-
-  async getPdfList(req, res) {
-    try {
-      const folder = (req.query.folder || 'pdfs').replace(/\/?$/, '/')
-      console.log(folder + '<----')
-      const results = await this.s3Service.listFiles(folder)
-      
-      if (results.length === 0) {
-        console.log("No files found in the specified folder.")
-        await this.loggingService.writeMessage('s3error', 'Folder is empty or does not exist')
-        return res.status(404).send('Not Found')
-      }
-
-      res.status(200).send(results)
-    } catch (err) {
-      console.error("Error listing files:", err)
-      await this.loggingService.writeMessage('s3Error', err)
-      return res.status(500).send(err)
-    }
-  }
-
-  async extractContacts(req, res) {
-    try {
-      const { pdfKeys } = req.body
-      
-      if (!pdfKeys || !Array.isArray(pdfKeys) || pdfKeys.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'pdfKeys array is required'
-        })
-      }
-
-      const result = await this.pdfService.processContactsFromPdfs(pdfKeys)
-      
-      res.status(result.success ? 200 : 400).json(result)
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: `Server error: ${error.message}`
-      })
-    }
-  }
-
-  async processSingleFile(req, res) {
-    try {
-      const { pdfKey, outputBucket } = req.body
-        
-      if (!pdfKey) {
-        return res.status(400).json({
-          success: false,
-          message: 'pdfKey is required'
-        })
-      }
-
-      const result = await this.pdfService.processSingleFile(pdfKey, outputBucket)
-      res.json(result)
-
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message
-      })
-    }
-  }
-
-  async getByKey(req, res) {
-    const key = req.query.key
-
-    if (!key) {
-      return res.status(400).send('Missing key')
-    }
-
-    try {
-      const data = await this.s3Service.getFileMetadata(key)
-      res.status(200).send(data)
-    } catch (err) {
-      console.error('Error fetching metadata:', err)
-      await this.loggingService.writeMessage('s3Error', err)
-
-      if (err.name === 'NotFound') {
-        return res.status(404).send('File not found')
-      }
-
-      return res.status(500).send('Error fetching PDF metadata')
-    }
-  }
-
-  // Contact management endpoints
-  async getContacts(req, res) {
-    try {
-      const {
-        limit = 25,
-        lastEvaluatedKey,
-        company,
-        record_type,
-        acknowledged,
-        islegal
-      } = req.query
-
-      const result = await this.contactService.queryContacts({
-        limit: parseInt(limit),
-        lastEvaluatedKey: lastEvaluatedKey ? JSON.parse(decodeURIComponent(lastEvaluatedKey)) : null,
-        filters: {
-          company,
-          record_type,
-          acknowledged: acknowledged !== undefined ? acknowledged === 'true' : undefined,
-          islegal: islegal !== undefined ? islegal === 'true' : undefined
-        }
-      })
-
-      res.status(200).json(result)
-
-    } catch (error) {
-      console.error('Error fetching contacts:', error.message)
-      res.status(500).json({
-        success: false,
-        message: `Error fetching contacts: ${error.message}`
-      })
-    }
-  }
-
-  async getContactStats(req, res) {
-    try {
-      const stats = await this.contactService.queryContactStatistics()
-      res.status(200).json(stats)
-    } catch (error) {
-      console.error('Error fetching contact stats:', error.message)
-      res.status(500).json({
-        success: false,
-        message: `Error fetching stats: ${error.message}`
-      })
-    }
-  }
-
-  async updateContactStatus(req, res) {
-    try {
-      const { pkey, skey, acknowledged, islegal } = req.body
-
-      if (!pkey || !skey) {
-        return res.status(400).json({
-          success: false,
-          message: 'pkey and skey are required'
-        })
-      }
-
-      const updateResult = await this.contactService.updateContact(pkey, skey, { acknowledged, islegal })
-      
-      res.status(updateResult.success ? 200 : 400).json(updateResult)
-
-    } catch (error) {
-      console.error('Error updating contact:', error.message)
-      res.status(500).json({
-        success: false,
-        message: `Update failed: ${error.message}`
-      })
-    }
-  }
-
-  async getProcessingResults(req, res) {
-    try {
-      const results = this.processingResults || []
-      const summary = {
-        totalProcessed: results.length,
-        optimized: results.filter(r => r.wasOptimized).length,
-        textExtracted: results.filter(r => r.textExtracted).length,
-        averageTextLength: results.reduce((sum, r) => sum + (r.textLength || 0), 0) / Math.max(results.length, 1),
-        methods: {
-          'ghostscript-basic': results.filter(r => r.method === 'ghostscript-basic').length,
-          'textract-only': results.filter(r => r.method === 'textract-only').length,
-          'ghostscript-textract': results.filter(r => r.method === 'ghostscript-textract').length,
-          basic: results.filter(r => r.method === 'basic').length,
-          textract: results.filter(r => r.method === 'textract').length
-        },
-        contentTypes: {
-          'text-based': results.filter(r => r.contentType === 'text-based').length,
-          'image-based': results.filter(r => r.contentType === 'image-based').length,
-          'mixed': results.filter(r => r.contentType === 'mixed').length
-        }
-      }
-      
-      res.status(200).json({
-        success: true,
-        summary,
-        results: results.slice(0, 50)
-      })
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message
-      })
-    }
-  }
-
-  // Configuration endpoints
-  async getConfig(req, res) {
-    try {
-      res.status(200).json({
-        success: true,
-        config: {
-          ...this.config,
-          ghostscriptAvailable: await this.isGhostscriptAvailable()
-        }
-      })
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message
-      })
-    }
-  }
-
-  async updateConfig(req, res) {
-    try {
-      const { useGhostscript, ghostscriptQuality, processLocally, maxFileSize, useTextract, smartProcessing } = req.body
-
-      if (useGhostscript !== undefined) {
-        this.config.useGhostscript = useGhostscript
-      }
-      
-      if (ghostscriptQuality && ['screen', 'ebook', 'printer', 'prepress'].includes(ghostscriptQuality)) {
-        this.config.ghostscriptQuality = ghostscriptQuality
-      }
-      
-      if (processLocally !== undefined) {
-        this.config.processLocally = processLocally
-      }
-      
-      if (maxFileSize && maxFileSize > 0) {
-        this.config.maxFileSize = maxFileSize
-      }
-
-      if (useTextract !== undefined) {
-        this.config.useTextract = useTextract
-      }
-
-      if (smartProcessing !== undefined) {
-        this.config.smartProcessing = smartProcessing
-      }
-
-      res.status(200).json({
-        success: true,
-        message: 'Configuration updated successfully',
-        config: this.config
-      })
-      
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message
-      })
-    }
-  }
-
-  async isGhostscriptAvailable() {
-    try {
-      execSync('gs --version', { stdio: 'ignore' })
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  async testGhostscript(req, res) {
-    try {
-      const available = await this.isGhostscriptAvailable()
-      
-      if (available) {
-        const version = execSync('gs --version', { encoding: 'utf8' }).trim()
-        res.status(200).json({
-          success: true,
-          available: true,
-          version: version,
-          message: 'Ghostscript is available'
-        })
-      } else {
-        res.status(200).json({
-          success: false,
-          available: false,
-          message: 'Ghostscript is not available'
-        })
-      }
-      
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message
-      })
-    }
-  }
-
-  async cleanupLocalFiles(req, res) {
-    try {
-      const { applicant, all } = req.query
-      
-      if (all === 'true') {
-        if (fs.existsSync(this.config.localDownloadPath)) {
-          fs.rmSync(this.config.localDownloadPath, { recursive: true, force: true })
-          this.ensureLocalDirectory()
-          console.log('🗑️ Cleaned up all local files')
-        }
-      } else if (applicant) {
-        const applicantDir = path.join(this.config.localDownloadPath, applicant)
-        if (fs.existsSync(applicantDir)) {
-          fs.rmSync(applicantDir, { recursive: true, force: true })
-          console.log(`🗑️ Cleaned up files for applicant: ${applicant}`)
-        }
-      }
-      
-      res.status(200).json({
-        success: true,
-        message: 'Cleanup completed successfully'
-      })
-      
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message
-      })
-    }
-  }
-
-  // Debug endpoints
-  async testDynamoClient(req, res) {
-    try {
-      console.log('🧪 Testing DynamoClient...')
-      res.status(200).json({
-        success: true,
-        message: 'DynamoClient test successful'
-      })
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: `DynamoClient test failed: ${error.message}`
-      })
-    }
-  }
-
-  async testContacts(req, res) {
-    try {
-      const result = await this.contactService.queryContacts({ limit: 5 })
-      res.status(200).json(result)
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message
-      })
-    }
-  }
-
-  async testPostgres(_req, res) {
-    try {
-      console.log('🧪 Testing PostgreSQL connection and model...')
-
-      // Check if service exists
-      if (!this.postgresContactService) {
-        return res.status(500).json({
-          success: false,
-          message: 'PostgresContactService not initialized'
-        })
-      }
-
-      const result = await this.postgresContactService.testConnection()
-      res.status(200).json(result)
-    } catch (error) {
-      console.error('❌ testPostgres error:', error)
-      res.status(500).json({
-        success: false,
-        message: error.message,
-        stack: error.stack
-      })
-    }
-  }
-
-  async getPostgresContacts(req, res) {
-    try {
-      // Check if service exists
-      if (!this.postgresContactService) {
-        return res.status(500).json({
-          success: false,
-          message: 'PostgresContactService not initialized'
-        })
-      }
-
-      const {
-        limit = 25,
-        offset = 0,
-        name,
-        company,
-        acknowledged,
-        islegal,
-        city,
-        state
-      } = req.query
-
-      const result = await this.postgresContactService.searchContacts({
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        name,
-        company,
-        acknowledged: acknowledged !== undefined ? acknowledged === 'true' : undefined,
-        islegal: islegal !== undefined ? islegal === 'true' : undefined,
-        city,
-        state
-      })
-
-      res.status(200).json(result)
-
-    } catch (error) {
-      console.error('Error fetching PostgreSQL contacts:', error.message)
-      res.status(500).json({
-        success: false,
-        message: `Error fetching contacts: ${error.message}`
-      })
-    }
-  }
-
-  async getPostgresContactStats(req, res) {
-    try {
-      // Check if service exists
-      if (!this.postgresContactService) {
-        return res.status(500).json({
-          success: false,
-          message: 'PostgresContactService not initialized'
-        })
-      }
-
-      const result = await this.postgresContactService.getContactStats()
-      res.status(200).json(result)
-
-    } catch (error) {
-      console.error('Error fetching PostgreSQL contact stats:', error.message)
-      res.status(500).json({
-        success: false,
-        message: `Error fetching stats: ${error.message}`
-      })
-    }
   }
 
   async debugMethods(_req, res) {
@@ -1247,153 +190,6 @@ class EmnrdController {
         success: false,
         message: error.message
       })
-    }
-  }
-
-  async debugConfig(_req, res) {
-    try {
-      console.log('🔍 Current Configuration Debug:')
-      console.log('- LOCAL_PDF_PATH env:', process.env.LOCAL_PDF_PATH)
-      console.log('- USE_GHOSTSCRIPT env:', process.env.USE_GHOSTSCRIPT)
-      console.log('- PROCESS_LOCALLY env:', process.env.PROCESS_LOCALLY)
-      console.log('- MAX_FILE_SIZE env:', process.env.MAX_FILE_SIZE)
-      console.log('- SMART_PROCESSING env:', process.env.SMART_PROCESSING)
-      console.log('- Config object:', JSON.stringify(this.config, null, 2))
-      
-      res.status(200).json({
-        success: true,
-        environment: {
-          LOCAL_PDF_PATH: process.env.LOCAL_PDF_PATH,
-          USE_GHOSTSCRIPT: process.env.USE_GHOSTSCRIPT,
-          PROCESS_LOCALLY: process.env.PROCESS_LOCALLY,
-          MAX_FILE_SIZE: process.env.MAX_FILE_SIZE,
-          KEEP_LOCAL_FILES: process.env.KEEP_LOCAL_FILES,
-          USE_TEXTRACT: process.env.USE_TEXTRACT,
-          SMART_PROCESSING: process.env.SMART_PROCESSING
-        },
-        activeConfig: this.config,
-        directoryExists: fs.existsSync(this.config.localDownloadPath),
-        ghostscriptAvailable: await this.isGhostscriptAvailable()
-      })
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: error.message
-      })
-    }
-  }
-
-  // PostgreSQL CSV processing workflow
-  async processCSVsToPostgres() {
-    console.log('🐘 Starting CSV processing to PostgreSQL...')
-
-    try {
-      // List all CSV files in the claude-csv bucket/folder
-      const csvFiles = await this.s3Service.listFiles('claude-csv')
-
-      if (csvFiles.length === 0) {
-        console.log('📭 No CSV files found in claude-csv folder for PostgreSQL processing')
-        return { success: false, message: 'No CSV files found' }
-      }
-
-      let totalRecordsProcessed = 0
-      let filesProcessed = 0
-      const validCsvFiles = csvFiles.filter(item =>
-        item.Key.endsWith('.csv') && !item.Key.endsWith('/')
-      )
-
-      console.log(`📁 Found ${validCsvFiles.length} CSV files to process for PostgreSQL`)
-
-      for (const csvFile of validCsvFiles) {
-        try {
-          console.log(`🔄 Processing CSV for PostgreSQL: ${csvFile.Key}`)
-
-          // Download CSV content from S3
-          const csvContent = await this.s3Service.downloadCSVFromS3(csvFile.Key)
-
-          // Parse CSV and extract contact data
-          const contactsFromCsv = await this.parseCSVToContactFormat(csvContent, csvFile.Key)
-
-          // Insert contacts into PostgreSQL
-          const insertResult = await this.postgresContactService.bulkInsertContacts(contactsFromCsv)
-
-          if (insertResult.success) {
-            totalRecordsProcessed += insertResult.insertedCount
-            filesProcessed++
-            console.log(`✅ Processed ${insertResult.insertedCount} records from ${csvFile.Key} to PostgreSQL`)
-          } else {
-            console.error(`❌ Failed to insert contacts from ${csvFile.Key}: ${insertResult.error}`)
-          }
-
-        } catch (fileError) {
-          console.error(`❌ Error processing file ${csvFile.Key} for PostgreSQL: ${fileError.message}`)
-        }
-      }
-
-      const result = {
-        success: true,
-        filesProcessed,
-        totalRecordsProcessed,
-        message: `Successfully processed ${totalRecordsProcessed} records from ${filesProcessed} CSV files to PostgreSQL`
-      }
-
-      console.log(`✅ PostgreSQL CSV processing completed: ${result.message}`)
-      return result
-
-    } catch (error) {
-      console.error('💥 PostgreSQL CSV processing failed:', error.message)
-      return {
-        success: false,
-        message: `PostgreSQL CSV processing failed: ${error.message}`
-      }
-    }
-  }
-
-  async parseCSVToContactFormat(csvContent, fileName) {
-    try {
-      const Papa = require('papaparse')
-      const parseResult = Papa.parse(csvContent, {
-        header: true,
-        skipEmptyLines: true,
-        dynamicTyping: false,
-        transformHeader: (header) => header.trim()
-      })
-
-      if (parseResult.errors.length > 0) {
-        console.warn(`⚠️ CSV parsing warnings for ${fileName}:`, parseResult.errors)
-      }
-
-      const records = parseResult.data
-      console.log(`📋 Parsed ${records.length} records from ${fileName} for PostgreSQL`)
-
-      // Convert CSV records to Claude contact format expected by PostgresContactService
-      const contacts = records.filter(record => record && Object.keys(record).length > 0).map(record => {
-        // Safely combine first and last name
-        const firstName = (record.first_name || '').trim()
-        const lastName = (record.last_name || '').trim()
-        const fullName = [firstName, lastName].filter(Boolean).join(' ') || record.name || ''
-
-        return {
-          name: fullName,
-          company: record.company || record.llc_owner || '',
-          first_name: firstName,
-          last_name: lastName,
-          address: record.address || '',
-          phone: record.phone1 || record.phone || '',
-          fax: record.fax || '',
-          email: record.email1 || record.email || '',
-          notes: record.notes || '',
-          record_type: record.record_type || null,
-          document_section: record.document_section || null,
-          source_file: record.source_file || fileName || null
-        }
-      })
-
-      return contacts
-
-    } catch (error) {
-      console.error(`Error parsing CSV data from ${fileName} for PostgreSQL:`, error.message)
-      throw error
     }
   }
 
@@ -1428,403 +224,64 @@ class EmnrdController {
     }
   }
 
-  // S3 PDF Analysis Job Methods
-  async processS3PdfsForAnalysis(req, res) {
-    if (this.s3AnalysisRunning) {
-      if (res) {
-        return res.status(429).json({
-          success: false,
-          message: 'S3 PDF analysis job is already running'
-        })
-      }
-      return { success: false, message: 'S3 PDF analysis job is already running' }
-    }
-
-    this.s3AnalysisRunning = true
-
-    try {
-      console.log(`[${new Date().toISOString()}] 🔍 Starting S3 PDF Analysis Job`)
-      console.log(`📁 Source: s3://${this.s3AnalysisConfig.sourceBucket}/${this.s3AnalysisConfig.sourceFolder}/`)
-
-      await this.loggingService.writeMessage('s3AnalysisStart', 'Started S3 PDF analysis job')
-      await this.authService.writeDynamoMessage({
-        pkey: 's3Analysis#job',
-        skey: 'start',
-        origin: 's3AnalysisJob',
-        type: 'system',
-        data: `Started S3 PDF analysis from s3://${this.s3AnalysisConfig.sourceBucket}/${this.s3AnalysisConfig.sourceFolder}/`
-      })
-
-      // Use existing S3 service but list files from the analysis folder
-      const pdfFiles = await this.s3Service.listFiles(this.s3AnalysisConfig.sourceFolder)
-      const validPdfFiles = pdfFiles.filter(file =>
-        file.Key.toLowerCase().endsWith('.pdf') && !file.Key.endsWith('/')
-      )
-
-      // Analyze file sizes and filter if needed
-      const textractLimit = parseInt(process.env.TEXTRACT_SIZE_LIMIT) || (10 * 1024 * 1024) // 10MB default
-      const maxFileSize = parseInt(process.env.MAX_FILE_SIZE) || (50 * 1024 * 1024) // 50MB default max
-
-      let oversizedFiles = []
-      let textractUnsuitableFiles = []
-      let processableFiles = []
-
-      validPdfFiles.forEach(file => {
-        const sizeMB = (file.Size / 1024 / 1024).toFixed(1)
-
-        if (file.Size > maxFileSize) {
-          oversizedFiles.push({ file: file.Key, size: sizeMB })
-          console.log(`🚫 SKIPPING - File too large (${sizeMB}MB): ${file.Key} - Exceeds max limit (${(maxFileSize/1024/1024).toFixed(1)}MB)`)
-        } else if (file.Size > textractLimit) {
-          textractUnsuitableFiles.push({ file: file.Key, size: sizeMB })
-          processableFiles.push(file)
-          console.log(`⚠️ Large file (${sizeMB}MB): ${file.Key} - Textract will fail, using basic extraction only`)
-        } else {
-          processableFiles.push(file)
-          console.log(`✓ Optimal file (${sizeMB}MB): ${file.Key} - All processing methods available`)
-        }
-      })
-
-      // Log summary of file filtering
-      if (oversizedFiles.length > 0) {
-        console.log(`\n🚨 DOCUMENT SIZE ALERT:`)
-        console.log(`📊 ${oversizedFiles.length} files SKIPPED due to size limits:`)
-        oversizedFiles.forEach(item => {
-          console.log(`   - ${item.file} (${item.size}MB)`)
-        })
-
-        await this.authService.writeDynamoMessage({
-          pkey: 's3Analysis#sizeAlert',
-          skey: 'oversized',
-          origin: 's3AnalysisJob',
-          type: 'warning',
-          data: `${oversizedFiles.length} files skipped - too large: ${oversizedFiles.map(f => f.file).join(', ')}`
-        })
-      }
-
-      if (textractUnsuitableFiles.length > 0) {
-        console.log(`\n⚠️ TEXTRACT LIMITATION ALERT:`)
-        console.log(`📊 ${textractUnsuitableFiles.length} files will use basic extraction only (>10MB):`)
-        textractUnsuitableFiles.forEach(item => {
-          console.log(`   - ${item.file} (${item.size}MB)`)
-        })
-      }
-
-      // Update to use filtered files
-      const finalFilesToProcess = processableFiles
-
-      if (finalFilesToProcess.length === 0) {
-        const message = validPdfFiles.length > 0
-          ? `No processable PDF files found (${oversizedFiles.length} files too large)`
-          : 'No PDF files found in analysis bucket'
-
-        console.log(`📭 ${message}`)
-        const result = { success: false, message }
-
-        await this.authService.writeDynamoMessage({
-          pkey: 's3Analysis#job',
-          skey: 'complete',
-          origin: 's3AnalysisJob',
-          type: 'system',
-          data: message
-        })
-
-        this.s3AnalysisRunning = false
-        if (res) return res.status(200).json(result)
-        return result
-      }
-
-      console.log(`\n📊 PROCESSING SUMMARY:`)
-      console.log(`   Total PDFs found: ${validPdfFiles.length}`)
-      console.log(`   Files to process: ${finalFilesToProcess.length}`)
-      console.log(`   Files skipped (too large): ${oversizedFiles.length}`)
-      console.log(`   Files with basic extraction only: ${textractUnsuitableFiles.length}`)
-
-      // Extract just the keys for processing
-      const pdfKeys = finalFilesToProcess.map(file => file.Key)
-
-      // Process the PDFs for contact extraction using existing services
-      const result = await this.pdfService.processContactsFromPdfs(pdfKeys)
-
-      if (result.success) {
-        console.log(`✅ S3 PDF Analysis completed successfully!`)
-        console.log(`📊 Extracted ${result.contactCount} contacts from ${result.filesProcessed} files`)
-
-        await this.loggingService.writeMessage('s3AnalysisComplete',
-          `SUCCESS: Extracted ${result.contactCount} contacts from ${result.filesProcessed} files`)
-
-        await this.authService.writeDynamoMessage({
-          pkey: 's3Analysis#job',
-          skey: 'complete',
-          origin: 's3AnalysisJob',
-          type: 'system',
-          data: `SUCCESS: Extracted ${result.contactCount} contacts from ${result.filesProcessed} files`
-        })
-
-        // Add analysis-specific metadata
-        result.sourceBucket = this.s3AnalysisConfig.sourceBucket
-        result.sourceFolder = this.s3AnalysisConfig.sourceFolder
-        result.totalFilesFound = validPdfFiles.length
-        result.filesProcessed = finalFilesToProcess.length
-        result.filesSkippedTooLarge = oversizedFiles.length
-        result.filesWithBasicExtractionOnly = textractUnsuitableFiles.length
-        result.analysisTimestamp = new Date().toISOString()
-
-        // Add detailed file categorization
-        if (oversizedFiles.length > 0) {
-          result.skippedFiles = oversizedFiles
-        }
-        if (textractUnsuitableFiles.length > 0) {
-          result.basicExtractionFiles = textractUnsuitableFiles
-        }
-
-      } else {
-        console.log(`❌ S3 PDF Analysis failed: ${result.message}`)
-        await this.loggingService.writeMessage('s3AnalysisFailed', `FAILED: ${result.message}`)
-
-        await this.authService.writeDynamoMessage({
-          pkey: 's3Analysis#job',
-          skey: 'error',
-          origin: 's3AnalysisJob',
-          type: 'system',
-          data: `FAILED: ${result.message}`
-        })
-      }
-
-      this.s3AnalysisRunning = false
-
-      if (res) {
-        return res.status(result.success ? 200 : 400).json(result)
-      }
-      return result
-
-    } catch (error) {
-      console.error(`💥 S3 PDF Analysis job error: ${error.message}`)
-      await this.loggingService.writeMessage('s3AnalysisError', error.message)
-
-      await this.authService.writeDynamoMessage({
-        pkey: 's3Analysis#job',
-        skey: 'error',
-        origin: 's3AnalysisJob',
-        type: 'system',
-        data: `ERROR: ${error.message}`
-      })
-
-      this.s3AnalysisRunning = false
-
-      const errorResult = {
-        success: false,
-        message: `S3 PDF Analysis failed: ${error.message}`,
-        sourceBucket: this.s3AnalysisConfig.sourceBucket,
-        sourceFolder: this.s3AnalysisConfig.sourceFolder,
-        errorTimestamp: new Date().toISOString()
-      }
-
-      if (res) {
-        return res.status(500).json(errorResult)
-      }
-      return errorResult
-    }
-  }
-
-  async getS3AnalysisStatus(req, res) {
-    const status = {
-      running: this.s3AnalysisRunning,
-      config: this.s3AnalysisConfig,
-      lastRun: null,
-      nextScheduled: null
-    }
-
-    try {
-      // You could add logic here to fetch last run time from DynamoDB logs if needed
-      if (res) {
-        return res.status(200).json({
-          success: true,
-          status
-        })
-      }
-      return { success: true, status }
-    } catch (error) {
-      const errorResult = {
-        success: false,
-        message: error.message,
-        status
-      }
-
-      if (res) {
-        return res.status(500).json(errorResult)
-      }
-      return errorResult
-    }
-  }
-
-  async updateS3AnalysisConfig(req, res) {
-    try {
-      const { sourceBucket, sourceFolder, enabled, schedule } = req.body
-
-      if (sourceBucket && typeof sourceBucket === 'string') {
-        this.s3AnalysisConfig.sourceBucket = sourceBucket
-      }
-
-      if (sourceFolder && typeof sourceFolder === 'string') {
-        this.s3AnalysisConfig.sourceFolder = sourceFolder
-      }
-
-      if (enabled !== undefined) {
-        this.s3AnalysisConfig.enabled = enabled
-      }
-
-      if (schedule && typeof schedule === 'string') {
-        this.s3AnalysisConfig.schedule = schedule
-      }
-
-      console.log(`🔧 S3 Analysis config updated:`, this.s3AnalysisConfig)
-
-      const result = {
-        success: true,
-        message: 'S3 Analysis configuration updated successfully',
-        config: this.s3AnalysisConfig
-      }
-
-      if (res) {
-        return res.status(200).json(result)
-      }
-      return result
-
-    } catch (error) {
-      const errorResult = {
-        success: false,
-        message: `Failed to update S3 analysis config: ${error.message}`
-      }
-
-      if (res) {
-        return res.status(500).json(errorResult)
-      }
-      return errorResult
-    }
-  }
-
-  async listS3AnalysisBucket(req, res) {
-    try {
-      // List files from the analysis folder using existing S3 service
-      const files = await this.s3Service.listFiles(this.s3AnalysisConfig.sourceFolder)
-      const pdfFiles = files.filter(file =>
-        file.Key.toLowerCase().endsWith('.pdf') && !file.Key.endsWith('/')
-      )
-
-      const result = {
-        success: true,
-        bucket: this.s3AnalysisConfig.sourceBucket,
-        folder: this.s3AnalysisConfig.sourceFolder,
-        totalFiles: files.length,
-        pdfFiles: pdfFiles.length,
-        files: pdfFiles.slice(0, 50) // Limit to first 50 for response size
-      }
-
-      if (res) {
-        return res.status(200).json(result)
-      }
-      return result
-
-    } catch (error) {
-      const errorResult = {
-        success: false,
-        message: `Failed to list S3 analysis folder: ${error.message}`,
-        bucket: this.s3AnalysisConfig.sourceBucket,
-        folder: this.s3AnalysisConfig.sourceFolder
-      }
-
-      if (res) {
-        return res.status(500).json(errorResult)
-      }
-      return errorResult
-    }
-  }
-
   // Cron job initialization
   initializeCronJob() {
-      // Original job - Tuesday 11:59 PM
-      //cron.schedule('34 16 * * *', async () => {
-      cron.schedule('59 23 * * 2', async () => {
+    // Original job - Tuesday 11:59 PM
+    cron.schedule('59 23 * * 2', async () => {
       this.filesToProcess = []
       try {
         console.log(`[${new Date().toISOString()}] Good morning! Running daily job at 11:05 AM`)
 
-        await this.authService.writeDynamoMessage({ 
+        await this.authService.writeDynamoMessage({
           pkey: 'schedule#pdfDownload',
           skey: 'schedule#start',
-          origin: 'scheduler', 
-          type:'system', 
+          origin: 'scheduler',
+          type:'system',
           data: `SUCCESS: Started Job`
         })
 
         console.log('Start download pdf Success')
-        
+
         this.appScheduleRunning = true
         await this.loggingService.writeMessage('downloadStart', 'started')
         await this.test()
         await this.loggingService.writeMessage('downloadComplete', 'success')
 
-        await this.authService.writeDynamoMessage({ 
+        await this.authService.writeDynamoMessage({
           pkey: 'schedule#pdfDownload',
           skey: 'schedule#complete',
-          origin: 'scheduler', 
-          type:'system', 
+          origin: 'scheduler',
+          type:'system',
           data: `SUCCESS: PDFs Downloaded`
         })
 
         console.log('completed pdf Success')
         console.log('-----------------------------------')
         console.log('process files')
-        
+
         console.log('-----------------------------------')
         console.log('🤖 Starting Claude contact extraction...')
 
-        await this.authService.writeDynamoMessage({ 
+        await this.authService.writeDynamoMessage({
           pkey: 'schedule#claudeStart',
           skey: 'schedule#start',
-          origin: 'claude', 
-          type:'system', 
+          origin: 'claude',
+          type:'system',
           data: `SUCCESS: Claude Started`
         })
 
         const contactExtractionResult = await this.pdfService.processContactsFromPdfs(this.filesToProcess)
-        
+
         if (contactExtractionResult.success) {
           console.log('✅ Claude contact extraction completed successfully!')
           console.log(`📊 Extracted ${contactExtractionResult.contactCount} contacts`)
-          await this.authService.writeDynamoMessage({ 
+          await this.authService.writeDynamoMessage({
             pkey: 'schedule#claudeStart',
             skey: 'schedule#complete',
-            origin: 'claude', 
-            type:'system', 
+            origin: 'claude',
+            type:'system',
             data: `SUCCESS: Claude Completed`
           })
-
-          // console.log('-----------------------------------')
-          // console.log('📊 Starting CSV processing to DynamoDB...')
-
-          // await this.authService.writeDynamoMessage({
-          //   pkey: 'schedule#csvProcessing',
-          //   skey: 'schedule#start',
-          //   origin: 'csvProcessor',
-          //   type:'system',
-          //   data: `SUCCESS: CSV Processing Started`
-          // })
-
-          // const csvProcessingResult = await this.contactService.processCSVsToDynamo()
-
-          // if (csvProcessingResult.success) {
-          //   console.log('✅ CSV processing to DynamoDB completed successfully!')
-          //   console.log(`📊 Processed ${csvProcessingResult.totalRecordsProcessed} records from ${csvProcessingResult.filesProcessed} CSV files`)
-
-          //   await this.authService.writeDynamoMessage({
-          //     pkey: 'schedule#csvProcessing',
-          //     skey: 'schedule#complete',
-          //     origin: 'csvProcessor',
-          //     type:'system',
-          //     data: `SUCCESS: ${csvProcessingResult.message}`
-          //   })
 
           console.log('-----------------------------------')
           console.log('🐘 Starting PostgreSQL processing...')
@@ -1837,7 +294,7 @@ class EmnrdController {
             data: 'SUCCESS: PostgreSQL Processing Started'
           })
 
-          const postgresProcessingResult = await this.processCSVsToPostgres()
+          const postgresProcessingResult = await this.contactController.processCSVsToPostgres()
 
           if (postgresProcessingResult.success) {
             console.log('✅ PostgreSQL processing completed successfully!')
@@ -1862,41 +319,29 @@ class EmnrdController {
             })
           }
 
-          // } else {
-          //   console.log('❌ CSV processing to DynamoDB failed:', csvProcessingResult.message)
-
-          //   await this.authService.writeDynamoMessage({
-          //     pkey: 'schedule#csvProcessing',
-          //     skey: 'schedule#error',
-          //     origin: 'csvProcessor',
-          //     type:'system',
-          //     data: `FAILED: ${csvProcessingResult.message}`
-          //   })
-          // }
-
         } else {
           console.log('❌ Claude contact extraction failed:', contactExtractionResult.message)
-          await this.authService.writeDynamoMessage({ 
+          await this.authService.writeDynamoMessage({
             pkey: 'schedule#claudeStart',
             skey: 'schedule#error',
-            origin: 'claude', 
-            type:'system', 
+            origin: 'claude',
+            type:'system',
             data: `FAILED: ${contactExtractionResult.message}`
           })
         }
-        
+
         console.log('files done processing')
         this.appScheduleRunning = false
       } catch (e) {
         console.log('----------- Failure ---------------')
         console.log(e)
         await this.loggingService.writeMessage('scheduleFailed', e.message)
-        
-        await this.authService.writeDynamoMessage({ 
+
+        await this.authService.writeDynamoMessage({
           pkey: 'schedule#failed',
           skey: 'error#failed',
-          origin: 'schedule', 
-          type:'system', 
+          origin: 'schedule',
+          type:'system',
           data: `FAILURE: ${e.message}`
         })
         console.log('----------- Failure ---------------')
@@ -1905,12 +350,12 @@ class EmnrdController {
     })
 
     // S3 PDF Analysis Job - Separate schedule
-    if (this.s3AnalysisConfig.enabled) {
-      console.log(`🔍 Initializing S3 PDF Analysis cron job: ${this.s3AnalysisConfig.schedule}`)
-      cron.schedule(this.s3AnalysisConfig.schedule, async () => {
+    if (this.s3AnalysisController.getConfig().enabled) {
+      console.log(`🔍 Initializing S3 PDF Analysis cron job: ${this.s3AnalysisController.getConfig().schedule}`)
+      cron.schedule(this.s3AnalysisController.getConfig().schedule, async () => {
         try {
           console.log(`[${new Date().toISOString()}] 🔍 Starting scheduled S3 PDF Analysis Job`)
-          await this.processS3PdfsForAnalysis()
+          await this.s3AnalysisController.processS3PdfsForAnalysis()
         } catch (error) {
           console.error('💥 Scheduled S3 PDF Analysis failed:', error.message)
           await this.loggingService.writeMessage('s3AnalysisScheduleFailed', error.message)
@@ -1929,53 +374,13 @@ const emnrdController = new EmnrdController()
 module.exports.Controller = { EmnrdController: emnrdController }
 module.exports.controller = (app) => {
   console.log('🔧 Loading EMNRD controller routes...')
-  // PDF and file management
-  app.get('/v1/pdflist', (req, res) => emnrdController.getPdfList(req, res))
-  app.get('/v1/pdfbykey', (req, res) => emnrdController.getByKey(req, res))
+
+  // Core workflow routes
   app.get('/v1/running', (req, res) => emnrdController.getStatus(req, res))
   app.get('/v1/force', (req, res) => emnrdController.test(req, res))
-  app.get('/v1/theprocess', (req, res) => emnrdController.processList(req, res))
-  app.post('/v1/extract-contacts', (req, res) => emnrdController.extractContacts(req, res))
-  app.post('/v1/processsingle', (req, res) => emnrdController.processSingleFile(req, res))
 
-  // Contact management endpoints (DynamoDB)
-  app.get('/v1/contacts', (req, res) => emnrdController.getContacts(req, res))
-  app.get('/v1/contacts/stats', (req, res) => emnrdController.getContactStats(req, res))
-  app.put('/v1/contacts/update', (req, res) => emnrdController.updateContactStatus(req, res))
-
-  // PostgreSQL contact management endpoints
-  app.get('/v1/postgres/contacts', (req, res) => emnrdController.getPostgresContacts(req, res))
-  app.get('/v1/postgres/contacts/stats', (req, res) => emnrdController.getPostgresContactStats(req, res))
-
-  // S3 PDF Analysis Job endpoints
-  app.post('/v1/s3-analysis/run', (req, res) => emnrdController.processS3PdfsForAnalysis(req, res))
-  app.get('/v1/s3-analysis/status', (req, res) => emnrdController.getS3AnalysisStatus(req, res))
-  app.put('/v1/s3-analysis/config', (req, res) => emnrdController.updateS3AnalysisConfig(req, res))
-  app.get('/v1/s3-analysis/list-bucket', (req, res) => emnrdController.listS3AnalysisBucket(req, res))
-
-  // Configuration and optimization endpoints
-  app.get('/v1/config', (req, res) => emnrdController.getConfig(req, res))
-  app.put('/v1/config', (req, res) => emnrdController.updateConfig(req, res))
-  app.get('/v1/processing-results', (req, res) => emnrdController.getProcessingResults(req, res))
-  app.get('/v1/test-ghostscript', (req, res) => emnrdController.testGhostscript(req, res))
-  app.delete('/v1/cleanup-local', (req, res) => emnrdController.cleanupLocalFiles(req, res))
-  
   // Debug endpoints
-  app.get('/v1/test-dynamo', (req, res) => emnrdController.testDynamoClient(req, res))
   app.get('/v1/debug-methods', (req, res) => emnrdController.debugMethods(req, res))
-  app.get('/v1/debug-config', (req, res) => emnrdController.debugConfig(req, res))
-  app.get('/v1/test-contacts', (req, res) => emnrdController.testContacts(req, res))
-  app.get('/v1/test-postgres', (req, res) => emnrdController.testPostgres(req, res))
-
-  // Simple postgres status check
-  app.get('/v1/postgres-status', (_req, res) => {
-    res.json({
-      postgresServiceExists: !!emnrdController.postgresContactService,
-      serviceMethods: emnrdController.postgresContactService ?
-        Object.getOwnPropertyNames(Object.getPrototypeOf(emnrdController.postgresContactService)) : [],
-      timestamp: new Date().toISOString()
-    })
-  })
 
   console.log('✅ EMNRD controller routes loaded successfully')
 }

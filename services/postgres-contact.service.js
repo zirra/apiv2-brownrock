@@ -347,7 +347,10 @@ class PostgresContactService {
         acknowledged,
         islegal,
         city,
-        state
+        state,
+        requireFirstName = false,
+        requireLastName = false,
+        requireBothNames = false
       } = options;
 
       const where = {};
@@ -358,6 +361,19 @@ class PostgresContactService {
       if (islegal !== undefined) where.islegal = islegal;
       if (city) where.city = { [this.sequelize.Sequelize.Op.iLike]: `%${city}%` };
       if (state) where.state = { [this.sequelize.Sequelize.Op.iLike]: `%${state}%` };
+
+      // Filter for non-null names
+      if (requireBothNames) {
+        where.first_name = { [this.sequelize.Sequelize.Op.ne]: null };
+        where.last_name = { [this.sequelize.Sequelize.Op.ne]: null };
+      } else {
+        if (requireFirstName) {
+          where.first_name = { [this.sequelize.Sequelize.Op.ne]: null };
+        }
+        if (requireLastName) {
+          where.last_name = { [this.sequelize.Sequelize.Op.ne]: null };
+        }
+      }
 
       const result = await this.Contact.findAndCountAll({
         where,
