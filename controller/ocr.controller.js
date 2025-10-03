@@ -790,6 +790,267 @@ class OCRController {
   }
 
   /**
+   * Process PDFs from applicants with Ghostscript + Tesseract OCR (Local Processing)
+   * Similar to EMNRD's test() method - downloads locally, processes with OCR, uploads to S3, then removes local files
+   */
+  async processApplicantsWithLocalOCR(req, res) {
+    const fs = require('fs')
+    const path = require('path')
+    const { execSync } = require('child_process')
+
+    try {
+      this.ocrCronJobRunning = true
+      this.filesToProcess = []
+
+      const applicantNames = this.dataService.getApplicantNames()
+
+      console.log(`\n🔍 [${new Date().toISOString()}] Starting Local OCR Applicant Processing`)
+      console.log(`📋 Processing ${applicantNames.length} applicants with local Ghostscript + Tesseract OCR`)
+
+      await this.loggingService.writeMessage('ocrLocalApplicantStart', 'Started local OCR applicant processing')
+      await this.authService.writeDynamoMessage({
+        pkey: 'ocrLocalApplicant#job',
+        skey: 'start',
+        origin: 'ocrLocalApplicantJob',
+        type: 'system',
+        data: `Started local OCR processing for ${applicantNames.length} applicants`
+      })
+
+      let totalFilesProcessed = 0
+      let totalContactsExtracted = 0
+
+      for (let j = 0; j < applicantNames.length; j++) {
+        const applicant = applicantNames[j]
+        console.log(`\n🔍 Processing applicant: ${applicant}`)
+
+        if (!this.authService.getToken()) {
+          await this.authService.login()
+        }
+
+        const response = await this.dataService.callForData(applicant)
+
+        if (!response || !response.data || !Array.isArray(response.data.Items)) {
+          console.warn(`⚠️ No valid data returned for applicant "${applicant}". Skipping...`)
+          await this.loggingService.writeMessage('missingItems', `No Items for ${applicant}`)
+          continue
+        }
+
+        const items = response.data.Items
+        console.log(`✅ Retrieved ${items.length} items for ${applicant}`)
+
+        const allPdfs = items.flatMap(item => item.ImagingFiles || [])
+
+        if (!allPdfs.length) {
+          console.log(`📭 No ImagingFiles found for "${applicant}".`)
+          continue
+        }
+
+        for (let i = 0; i < allPdfs.length; i++) {
+          const pdf = allPdfs[i]
+          const s3Key = `ocr-pdfs/${applicant}/${pdf.FileName}`
+
+          if (pdf.FileSize <= this.config.maxFileSize) {
+            let localPath = null
+            let flattenedPath = null
+
+            try {
+              this.filesToProcess.push(s3Key)
+
+              // Step 1: Download PDF locally
+              console.log(`⬇️ Downloading ${pdf.FileName} locally for OCR processing...`)
+
+              const applicantDir = path.join(this.config.localDownloadPath, applicant)
+              if (!fs.existsSync(applicantDir)) {
+                fs.mkdirSync(applicantDir, { recursive: true })
+              }
+
+              localPath = path.join(applicantDir, pdf.FileName)
+              const token = this.authService.getToken()
+
+              const response = await fetch(pdf.Url, {
+                method: 'GET',
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Accept': 'application/pdf, */*'
+                }
+              })
+
+              if (!response.ok) {
+                throw new Error(`Download failed: ${response.status}`)
+              }
+
+              const buffer = await response.arrayBuffer()
+              fs.writeFileSync(localPath, Buffer.from(buffer))
+              console.log(`✅ Downloaded ${pdf.FileName} (${pdf.FileSize} bytes)`)
+
+              // Step 2: Flatten with Ghostscript
+              const tempDir = process.env.OCR_TEMP_DIR || './temp/ocr'
+              if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true })
+              }
+
+              flattenedPath = path.join(tempDir, `flattened_${Date.now()}_${pdf.FileName}`)
+
+              if (this.config.useGhostscript) {
+                console.log(`🔧 Flattening ${pdf.FileName} with Ghostscript...`)
+                const gsQuality = process.env.GS_QUALITY || 'ebook'
+                const gsCommand = [
+                  'gs',
+                  '-sDEVICE=pdfwrite',
+                  '-dCompatibilityLevel=1.4',
+                  `-dPDFSETTINGS=/${gsQuality}`,
+                  '-dNOPAUSE',
+                  '-dQUIET',
+                  '-dBATCH',
+                  `-sOutputFile=${flattenedPath}`,
+                  localPath
+                ].join(' ')
+
+                execSync(gsCommand, { stdio: 'pipe' })
+                console.log(`✅ Ghostscript flattening complete`)
+              } else {
+                // Skip Ghostscript, use original file
+                flattenedPath = localPath
+              }
+
+              const processingPath = this.config.useGhostscript ? flattenedPath : localPath
+
+              // Step 3: Extract text with multi-tier OCR
+              console.log(`📄 Extracting text with multi-tier OCR...`)
+              const pdfBuffer = fs.readFileSync(processingPath)
+              const ocrResult = await this.ocrService.extractTextWithMultiOCR(pdfBuffer, pdf.FileName)
+
+              console.log(`📝 Extracted ${ocrResult.extractedText.length} characters using ${ocrResult.method}`)
+
+              // Step 4: Extract contacts with Claude
+              let contacts = []
+              if (ocrResult.success && ocrResult.extractedText.length > 100) {
+                console.log(`🤖 Extracting contacts with Claude AI...`)
+                contacts = await this.extractContactsFromText(ocrResult.extractedText, pdf.FileName)
+                console.log(`✅ Claude extracted ${contacts.length} contacts`)
+
+                // Save to PostgreSQL
+                if (contacts.length > 0 && this.postgresContactService) {
+                  const insertResult = await this.postgresContactService.bulkInsertContacts(
+                    contacts.map(c => ({
+                      ...c,
+                      source_file: pdf.FileName,
+                      record_type: applicant
+                    }))
+                  )
+
+                  if (insertResult.success) {
+                    console.log(`💾 Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+                    totalContactsExtracted += insertResult.insertedCount
+                  }
+                }
+              }
+
+              // Step 5: Upload processed PDF to S3
+              console.log(`☁️ Uploading to S3: ${s3Key}`)
+              const uploadBuffer = fs.readFileSync(processingPath)
+              await this.s3Service.uploadBufferToS3(uploadBuffer, s3Key)
+              console.log(`✅ Uploaded to S3`)
+
+              // Step 6: Cleanup local files (unless KEEP_LOCAL_FILES is set)
+              if (!process.env.KEEP_LOCAL_FILES) {
+                if (localPath && fs.existsSync(localPath)) {
+                  fs.unlinkSync(localPath)
+                  console.log(`🗑️ Removed local file: ${localPath}`)
+                }
+                if (flattenedPath && flattenedPath !== localPath && fs.existsSync(flattenedPath)) {
+                  fs.unlinkSync(flattenedPath)
+                  console.log(`🗑️ Removed flattened file: ${flattenedPath}`)
+                }
+              }
+
+              totalFilesProcessed++
+              console.log(`✅ Completed OCR processing for ${pdf.FileName}`)
+              console.log(`📊 Summary: ${ocrResult.method} | ${ocrResult.extractedText.length} chars | ${contacts.length} contacts`)
+
+            } catch (processErr) {
+              console.error(`❌ Processing failed for ${pdf.FileName}: ${processErr.message}`)
+              await this.loggingService.writeMessage('ocrLocalProcessingFail', `${processErr.message} ${pdf.FileName}`)
+
+              // Cleanup on error
+              try {
+                if (localPath && fs.existsSync(localPath)) fs.unlinkSync(localPath)
+                if (flattenedPath && flattenedPath !== localPath && fs.existsSync(flattenedPath)) {
+                  fs.unlinkSync(flattenedPath)
+                }
+              } catch (cleanupErr) {
+                console.error(`❌ Cleanup error: ${cleanupErr.message}`)
+              }
+            }
+
+            // Delay between files to avoid rate limits
+            if (i < allPdfs.length - 1) {
+              console.log(`⏸️ Waiting 3 seconds before next file...`)
+              await new Promise(resolve => setTimeout(resolve, 3000))
+            }
+          } else {
+            console.log(`⚠️ ${pdf.FileName} skipping due to file size (${pdf.FileSize} bytes > ${this.config.maxFileSize} bytes)`)
+          }
+        }
+      }
+
+      this.ocrCronJobRunning = false
+
+      const result = {
+        success: true,
+        message: 'Local OCR applicant processing completed',
+        filesProcessed: totalFilesProcessed,
+        contactsExtracted: totalContactsExtracted,
+        timestamp: new Date().toISOString()
+      }
+
+      console.log(`✅ Local OCR Applicant Processing Complete:`)
+      console.log(`   📁 Files processed: ${totalFilesProcessed}`)
+      console.log(`   📇 Contacts extracted: ${totalContactsExtracted}`)
+
+      await this.authService.writeDynamoMessage({
+        pkey: 'ocrLocalApplicant#job',
+        skey: 'complete',
+        origin: 'ocrLocalApplicantJob',
+        type: 'system',
+        data: `Completed local OCR processing: ${totalFilesProcessed} files, ${totalContactsExtracted} contacts`
+      })
+
+      if (res) {
+        return res.status(200).json(result)
+      }
+
+      return result
+
+    } catch (error) {
+      console.error(`💥 Local OCR Applicant Processing failed: ${error.message}`)
+      await this.loggingService.writeMessage('ocrLocalApplicantError', error.message)
+
+      this.ocrCronJobRunning = false
+
+      const errorResult = {
+        success: false,
+        message: `Local OCR processing failed: ${error.message}`,
+        timestamp: new Date().toISOString()
+      }
+
+      await this.authService.writeDynamoMessage({
+        pkey: 'ocrLocalApplicant#job',
+        skey: 'error',
+        origin: 'ocrLocalApplicantJob',
+        type: 'system',
+        data: `ERROR: ${error.message}`
+      })
+
+      if (res) {
+        return res.status(500).json(errorResult)
+      }
+
+      return errorResult
+    }
+  }
+
+  /**
    * Process PDFs from applicants with Ghostscript + Tesseract OCR
    * Similar to EMNRD's test() method but uses OCR instead of Textract
    */
@@ -1070,13 +1331,13 @@ class OCRController {
       })
     }
 
-    // OCR Applicant Job (if enabled)
+    // OCR Applicant Job (if enabled) - uses local processing variant
     if (this.config.ocrCronEnabled) {
       console.log(`🤖 OCR Applicant cron job: ${this.config.ocrCronSchedule}`)
       cron.schedule(this.config.ocrCronSchedule, async () => {
         try {
-          console.log(`[${new Date().toISOString()}] 🤖 Running scheduled OCR Applicant job`)
-          await this.processApplicantsWithOCR()
+          console.log(`[${new Date().toISOString()}] 🤖 Running scheduled OCR Applicant job (local processing)`)
+          await this.processApplicantsWithLocalOCR()
         } catch (error) {
           console.error('💥 Scheduled OCR Applicant job failed:', error.message)
           await this.loggingService.writeMessage('ocrApplicantScheduleFailed', error.message)
@@ -1363,8 +1624,9 @@ module.exports.controller = (app) => {
   app.post('/v1/ocr/process-claude-only', (req, res) => ocrController.processSingleFileClaudeOnly(req, res))
   app.post('/v1/ocr/process-ghostscript-claude', (req, res) => ocrController.processSingleFileGhostscriptClaude(req, res))
 
-  // OCR Applicant processing endpoint (like EMNRD test)
+  // OCR Applicant processing endpoints
   app.post('/v1/ocr/process-applicants', (req, res) => ocrController.processApplicantsWithOCR(req, res))
+  app.post('/v1/ocr/process-applicants-local', (req, res) => ocrController.processApplicantsWithLocalOCR(req, res))
 
   // Direct file upload endpoint - uses multer middleware
   app.post('/v1/ocr/upload-and-process', upload.single('pdf'), (req, res) => ocrController.uploadAndProcess(req, res))
