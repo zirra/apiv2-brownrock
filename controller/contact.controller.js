@@ -162,6 +162,72 @@ class ContactController {
     }
   }
 
+  async exportPostgresContactsCSV(req, res) {
+    try {
+      // Check if service exists
+      if (!this.postgresContactService) {
+        return res.status(500).json({
+          success: false,
+          message: 'PostgresContactService not initialized'
+        })
+      }
+
+      const {
+        name,
+        company,
+        acknowledged,
+        islegal,
+        city,
+        state,
+        requireFirstName,
+        requireLastName,
+        requireBothNames
+      } = req.query
+
+      // Fetch all contacts matching the filters (no pagination for export)
+      const result = await this.postgresContactService.searchContacts({
+        limit: 1000000, // Large limit to get all records
+        offset: 0,
+        name,
+        company,
+        acknowledged: acknowledged !== undefined ? acknowledged === 'true' : undefined,
+        islegal: islegal !== undefined ? islegal === 'true' : undefined,
+        city,
+        state,
+        requireFirstName: requireFirstName === 'true',
+        requireLastName: requireLastName === 'true',
+        requireBothNames: requireBothNames === 'true'
+      })
+
+      if (!result.success || !result.contacts || result.contacts.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'No contacts found matching the criteria'
+        })
+      }
+
+      // Convert to CSV format
+      const Papa = require('papaparse')
+      const csv = Papa.unparse(result.contacts, {
+        header: true,
+        columns: ['id', 'name', 'company', 'first_name', 'last_name', 'address', 'phone', 'fax', 'email', 'notes', 'record_type', 'document_section', 'source_file', 'acknowledged', 'islegal', 'created_at', 'updated_at']
+      })
+
+      // Set headers for CSV download
+      const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0]
+      res.setHeader('Content-Type', 'text/csv')
+      res.setHeader('Content-Disposition', `attachment; filename="contacts-export-${timestamp}.csv"`)
+      res.status(200).send(csv)
+
+    } catch (error) {
+      console.error('Error exporting PostgreSQL contacts to CSV:', error.message)
+      res.status(500).json({
+        success: false,
+        message: `Error exporting contacts: ${error.message}`
+      })
+    }
+  }
+
   // PostgreSQL CSV Processing
   async processCSVsToPostgres() {
     console.log('🐘 Starting CSV processing to PostgreSQL...')
@@ -390,6 +456,7 @@ module.exports.controller = (app) => {
   // PostgreSQL contact management endpoints
   app.get('/v1/postgres/contacts', (req, res) => contactController.getPostgresContacts(req, res))
   app.get('/v1/postgres/contacts/stats', (req, res) => contactController.getPostgresContactStats(req, res))
+  app.get('/v1/postgres/contacts/export', (req, res) => contactController.exportPostgresContactsCSV(req, res))
   app.post('/v1/postgres/contacts/deduplicate', (req, res) => contactController.deduplicatePostgresContacts(req, res))
 
   // Debug endpoints
