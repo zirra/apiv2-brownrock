@@ -699,32 +699,28 @@ class OCRController {
 
       // Extract contacts with Claude
       let contacts = []
-      let claudeResult = null
 
       if (extractedText.length > 100) {
         console.log(`🤖 Extracting contacts with Claude AI...`)
         const startClaudeTime = Date.now()
 
-        claudeResult = await this.pdfService.extractContactsFromText(extractedText)
+        contacts = await this.extractContactsFromText(extractedText, originalName)
         const claudeTime = Date.now() - startClaudeTime
 
-        if (claudeResult.success && claudeResult.contacts) {
-          contacts = claudeResult.contacts
-          console.log(`✅ Claude extracted ${contacts.length} contacts in ${claudeTime}ms`)
+        console.log(`✅ Claude extracted ${contacts.length} contacts in ${claudeTime}ms`)
 
-          // Save contacts to PostgreSQL
-          if (contacts.length > 0) {
-            console.log(`💾 Saving ${contacts.length} contacts to PostgreSQL...`)
-            const insertResult = await this.postgresContactService.bulkInsertContacts(
-              contacts.map(c => ({
-                ...c,
-                source_file: originalName
-              }))
-            )
+        // Save contacts to PostgreSQL
+        if (contacts.length > 0) {
+          console.log(`💾 Saving ${contacts.length} contacts to PostgreSQL...`)
+          const insertResult = await this.postgresContactService.bulkInsertContacts(
+            contacts.map(c => ({
+              ...c,
+              source_file: originalName
+            }))
+          )
 
-            if (insertResult.success) {
-              console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
-            }
+          if (insertResult.success) {
+            console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
           }
         }
       }
