@@ -38,7 +38,7 @@ class EmnrdController {
     }
 
     // Initialize cron job
-    this.initializeCronJob()
+    // this.initializeCronJob()
   }
 
   // Main workflow - processes PDFs from applicants

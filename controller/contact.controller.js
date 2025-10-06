@@ -403,6 +403,50 @@ class ContactController {
     })
   }
 
+  async updatePostgresContactStatus(req, res) {
+    try {
+      // Check if service exists
+      if (!this.postgresContactService) {
+        return res.status(500).json({
+          success: false,
+          message: 'PostgresContactService not initialized'
+        })
+      }
+
+      const { id, acknowledged, islegal } = req.body
+
+      if (!id) {
+        return res.status(400).json({
+          success: false,
+          message: 'id is required'
+        })
+      }
+
+      // Build updates object with only provided fields
+      const updates = {}
+      if (acknowledged !== undefined) updates.acknowledged = acknowledged
+      if (islegal !== undefined) updates.islegal = islegal
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'At least one field (acknowledged or islegal) must be provided'
+        })
+      }
+
+      const result = await this.postgresContactService.updateContactStatus(id, updates)
+
+      res.status(result.success ? 200 : 404).json(result)
+
+    } catch (error) {
+      console.error('Error updating PostgreSQL contact:', error.message)
+      res.status(500).json({
+        success: false,
+        message: `Update failed: ${error.message}`
+      })
+    }
+  }
+
   async deduplicatePostgresContacts(req, res) {
     try {
       // Check if service exists
@@ -457,6 +501,7 @@ module.exports.controller = (app) => {
   app.get('/v1/postgres/contacts', (req, res) => contactController.getPostgresContacts(req, res))
   app.get('/v1/postgres/contacts/stats', (req, res) => contactController.getPostgresContactStats(req, res))
   app.get('/v1/postgres/contacts/export', (req, res) => contactController.exportPostgresContactsCSV(req, res))
+  app.put('/v1/postgres/contacts/update', (req, res) => contactController.updatePostgresContactStatus(req, res))
   app.post('/v1/postgres/contacts/deduplicate', (req, res) => contactController.deduplicatePostgresContacts(req, res))
 
   // Debug endpoints
