@@ -469,7 +469,48 @@ class ClaudeContactExtractor {
    * Use Claude to extract contact information from text
    */
   /**
+   * Split PDF into chunks of specified page count
+   * @param {Buffer} pdfBuffer - PDF file as buffer
+   * @param {number} maxPages - Maximum pages per chunk (default 100)
+   * @returns {Promise<Array<Buffer>>} - Array of PDF buffers
+   */
+  async splitPDF(pdfBuffer, maxPages = 100) {
+    try {
+      const { PDFDocument } = require('pdf-lib')
+      const pdfDoc = await PDFDocument.load(pdfBuffer)
+      const totalPages = pdfDoc.getPageCount()
+
+      this.logger.info(`📄 PDF has ${totalPages} pages, splitting into chunks of ${maxPages} pages...`)
+
+      if (totalPages <= maxPages) {
+        return [pdfBuffer] // No need to split
+      }
+
+      const chunks = []
+      for (let i = 0; i < totalPages; i += maxPages) {
+        const chunkDoc = await PDFDocument.create()
+        const endPage = Math.min(i + maxPages, totalPages)
+
+        // Copy pages to new document
+        const copiedPages = await chunkDoc.copyPages(pdfDoc, Array.from({ length: endPage - i }, (_, idx) => i + idx))
+        copiedPages.forEach(page => chunkDoc.addPage(page))
+
+        const chunkBytes = await chunkDoc.save()
+        chunks.push(Buffer.from(chunkBytes))
+
+        this.logger.info(`✅ Created chunk ${chunks.length}: pages ${i + 1}-${endPage}`)
+      }
+
+      return chunks
+    } catch (error) {
+      this.logger.error(`❌ PDF splitting failed: ${error.message}`)
+      throw error
+    }
+  }
+
+  /**
    * Extract contacts directly from PDF using Claude's native PDF vision capabilities
+   * Automatically splits PDFs over 100 pages
    * @param {Buffer} pdfBuffer - PDF file as buffer
    * @param {string} filename - Original filename for reference
    * @returns {Promise<Array>} - Array of extracted contacts
@@ -569,6 +610,36 @@ Requirements:
 
     } catch (error) {
       this.logger.error('Error processing PDF with Claude native:', error.message);
+
+      // Handle 100-page limit error by splitting PDF
+      if (error.status === 400 && error.message && error.message.includes('100 PDF pages')) {
+        this.logger.warn('⚠️ PDF exceeds 100-page limit, splitting into chunks...');
+
+        try {
+          const chunks = await this.splitPDF(pdfBuffer, 100)
+          this.logger.info(`📑 Split PDF into ${chunks.length} chunks, processing each...`)
+
+          let allContacts = []
+          for (let i = 0; i < chunks.length; i++) {
+            this.logger.info(`🔄 Processing chunk ${i + 1}/${chunks.length}...`)
+            const chunkContacts = await this.extractContactsFromPDFNative(chunks[i], `${filename} (chunk ${i + 1})`, 0)
+            allContacts = allContacts.concat(chunkContacts)
+
+            // Delay between chunks to avoid rate limits
+            if (i < chunks.length - 1) {
+              this.logger.info(`⏸️ Waiting 3 seconds before next chunk...`)
+              await new Promise(resolve => setTimeout(resolve, 3000))
+            }
+          }
+
+          this.logger.info(`✅ Processed all ${chunks.length} chunks: ${allContacts.length} total contacts`)
+          return allContacts
+
+        } catch (splitError) {
+          this.logger.error(`❌ PDF splitting/processing failed: ${splitError.message}`)
+          return []
+        }
+      }
 
       // Handle rate limit (429) and overloaded (529) errors with exponential backoff
       if ((error.status === 429 || error.status === 529) && retryCount < maxRetries) {
