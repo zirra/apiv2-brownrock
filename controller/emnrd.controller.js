@@ -1,5 +1,8 @@
 require('dotenv').config()
 const cron = require('node-cron')
+const multer = require('multer')
+const fs = require('fs')
+const path = require('path')
 
 // Import services
 const AuthService = require('../services/auth.service.js')
@@ -7,11 +10,42 @@ const S3Service = require('../services/s3.service.js')
 const LoggingService = require('../services/logging.service.js')
 const DataService = require('../services/data.service.js')
 const PDFService = require('../services/pdf.service.js')
+const PostgresContactService = require('../services/postgres-contact.service.js')
 
 // Import other controllers
 const { Controller: PdfControllerModule } = require('./pdf.controller.js')
 const { Controller: ContactControllerModule } = require('./contact.controller.js')
 const { Controller: S3AnalysisControllerModule } = require('./s3-analysis.controller.js')
+
+// Configure multer for file uploads
+const uploadDir = process.env.UPLOAD_TEMP_DIR || './temp/uploads'
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true })
+}
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir)
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
+    cb(null, `upload-${uniqueSuffix}-${file.originalname}`)
+  }
+})
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: parseInt(process.env.MAX_UPLOAD_SIZE) || (50 * 1024 * 1024) // 50MB default
+  },
+  fileFilter: function (req, file, cb) {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true)
+    } else {
+      cb(new Error('Only PDF files are allowed'))
+    }
+  }
+})
 
 class EmnrdController {
   constructor() {
@@ -26,6 +60,7 @@ class EmnrdController {
     this.pdfController = PdfControllerModule.PdfController
     this.contactController = ContactControllerModule.ContactController
     this.s3AnalysisController = S3AnalysisControllerModule.S3AnalysisController
+    this.postgresContactService = new PostgresContactService()
 
     // State
     this.filesToProcess = []
@@ -38,7 +73,7 @@ class EmnrdController {
     }
 
     // Initialize cron job
-    // this.initializeCronJob()
+    this.initializeCronJob()
   }
 
   // Main workflow - processes PDFs from applicants
@@ -189,6 +224,160 @@ class EmnrdController {
       res.status(500).json({
         success: false,
         message: error.message
+      })
+    }
+  }
+
+  /**
+   * Upload and process a single PDF with Ghostscript + Textract + Claude
+   * Accepts multipart/form-data file upload
+   */
+  async uploadAndProcess(req, res) {
+    let uploadedFilePath = null
+    let localPath = null
+    let optimizedPath = null
+
+    try {
+      // Check if file was uploaded
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: 'No PDF file uploaded. Please upload a PDF file with field name "pdf"'
+        })
+      }
+
+      uploadedFilePath = req.file.path
+      const originalName = req.file.originalname
+      const applicantName = req.body.applicant || 'manual-upload'
+
+      console.log(`📤 Received upload: ${originalName} (${req.file.size} bytes)`)
+      console.log(`📋 Applicant: ${applicantName}`)
+
+      // Create local directory for processing
+      const localDir = path.join(process.env.LOCAL_PDF_PATH || './downloads/pdfs', applicantName)
+      if (!fs.existsSync(localDir)) {
+        fs.mkdirSync(localDir, { recursive: true })
+      }
+
+      localPath = path.join(localDir, originalName)
+
+      // Move uploaded file to processing directory
+      fs.renameSync(uploadedFilePath, localPath)
+      console.log(`📁 File moved to: ${localPath}`)
+
+      // S3 key for upload
+      const s3Key = `pdfs/${applicantName}/${originalName}`
+
+      // Process with smart optimization and text extraction
+      console.log(`🔄 Processing with Ghostscript + Textract + Claude...`)
+      const processingResult = this.pdfController.config.smartProcessing
+        ? await this.pdfController.smartOptimizeAndExtract(localPath, s3Key)
+        : await this.pdfController.optimizeAndExtractText(localPath, s3Key)
+
+      optimizedPath = processingResult.optimizedPath
+
+      console.log(`📊 Processing summary:`)
+      console.log(`   - Optimization: ${processingResult.wasOptimized ? 'Yes' : 'No'}`)
+      console.log(`   - Text extracted: ${processingResult.textLength} characters`)
+      console.log(`   - Method: ${processingResult.method}`)
+      console.log(`   - Steps: ${processingResult.processingSteps.join(' → ')}`)
+
+      // Upload to S3 if not already uploaded by Textract
+      if (!processingResult.uploadedToS3) {
+        console.log(`☁️ Uploading processed PDF to S3: ${s3Key}`)
+        await this.pdfController.uploadOptimizedToS3(optimizedPath, s3Key)
+        console.log(`✅ Uploaded to S3`)
+      } else {
+        console.log(`✅ Already uploaded to S3 by Textract`)
+      }
+
+      // Extract contacts from the extracted text using Claude
+      let contacts = []
+      if (processingResult.extractedText && processingResult.extractedText.length > 100) {
+        console.log(`🤖 Extracting contacts with Claude AI...`)
+        const contactResult = await this.pdfService.extractContactsFromText(processingResult.extractedText)
+
+        if (contactResult.success && contactResult.contacts) {
+          contacts = contactResult.contacts.map(c => ({
+            ...c,
+            source_file: originalName,
+            record_type: applicantName
+          }))
+          console.log(`✅ Claude extracted ${contacts.length} contacts`)
+
+          // Save to PostgreSQL
+          if (contacts.length > 0) {
+            console.log(`💾 Saving ${contacts.length} contacts to PostgreSQL...`)
+            const insertResult = await this.postgresContactService.bulkInsertContacts(contacts)
+
+            if (insertResult.success) {
+              console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+            }
+          }
+        }
+      }
+
+      // Cleanup local files (unless KEEP_LOCAL_FILES is set)
+      if (!process.env.KEEP_LOCAL_FILES) {
+        if (localPath && fs.existsSync(localPath)) {
+          fs.unlinkSync(localPath)
+          console.log(`🗑️ Removed local file: ${localPath}`)
+        }
+        if (optimizedPath && optimizedPath !== localPath && fs.existsSync(optimizedPath)) {
+          fs.unlinkSync(optimizedPath)
+          console.log(`🗑️ Removed optimized file: ${optimizedPath}`)
+        }
+        if (processingResult.textPath && fs.existsSync(processingResult.textPath)) {
+          fs.unlinkSync(processingResult.textPath)
+          console.log(`🗑️ Removed text file: ${processingResult.textPath}`)
+        }
+      }
+
+      const result = {
+        success: true,
+        file: originalName,
+        applicant: applicantName,
+        s3Key: s3Key,
+        processing: {
+          wasOptimized: processingResult.wasOptimized,
+          method: processingResult.method,
+          steps: processingResult.processingSteps,
+          textLength: processingResult.textLength,
+          extractedTextPreview: processingResult.extractedText?.substring(0, 500) +
+            (processingResult.extractedText?.length > 500 ? '...' : '')
+        },
+        contacts: {
+          count: contacts.length,
+          contacts: contacts
+        },
+        timestamp: new Date().toISOString()
+      }
+
+      return res.status(200).json(result)
+
+    } catch (error) {
+      console.error(`❌ Upload processing failed: ${error.message}`)
+      console.error(error.stack)
+
+      // Cleanup on error
+      try {
+        if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+          fs.unlinkSync(uploadedFilePath)
+        }
+        if (localPath && fs.existsSync(localPath)) {
+          fs.unlinkSync(localPath)
+        }
+        if (optimizedPath && fs.existsSync(optimizedPath)) {
+          fs.unlinkSync(optimizedPath)
+        }
+      } catch (cleanupErr) {
+        console.error(`❌ Cleanup error: ${cleanupErr.message}`)
+      }
+
+      return res.status(500).json({
+        success: false,
+        message: `Processing failed: ${error.message}`,
+        error: error.stack
       })
     }
   }
@@ -372,12 +561,16 @@ const emnrdController = new EmnrdController()
 
 // Export both the Controller class and controller function for routes
 module.exports.Controller = { EmnrdController: emnrdController }
+module.exports.upload = upload
 module.exports.controller = (app) => {
   console.log('🔧 Loading EMNRD controller routes...')
 
   // Core workflow routes
   app.get('/v1/running', (req, res) => emnrdController.getStatus(req, res))
   app.get('/v1/force', (req, res) => emnrdController.test(req, res))
+
+  // Single file upload endpoint - uses multer middleware
+  app.post('/v1/emnrd/upload-and-process', upload.single('pdf'), (req, res) => emnrdController.uploadAndProcess(req, res))
 
   // Debug endpoints
   app.get('/v1/debug-methods', (req, res) => emnrdController.debugMethods(req, res))

@@ -482,6 +482,7 @@ EXTRACT:
 
 PRIORITY SOURCES (extract ALL):
 - Postal delivery tables/certified mail lists
+- Transaction report, Transaction Report Details
 - Interest owner tables (WI, ORRI, MI, UMI owners)
 - Revenue/mailing lists
 
