@@ -70,6 +70,7 @@ class EmnrdController {
     this.config = {
       maxFileSize: parseInt(process.env.MAX_FILE_SIZE) || 500000,
       processLocally: process.env.PROCESS_LOCALLY === 'true',
+      useNativePdf: process.env.USE_NATIVE_PDF === 'true', // Use Claude native PDF vision
     }
 
     // Initialize cron job
@@ -120,43 +121,97 @@ class EmnrdController {
                 console.log(`⬇️ Downloading ${pdf.FileName} locally for processing...`)
                 const localPath = await this.pdfController.downloadPdfLocally(pdf.Url, pdf.FileName, applicant)
 
-                const processingResult = this.pdfController.config.smartProcessing ?
-                  await this.pdfController.smartOptimizeAndExtract(localPath, s3Key) :
-                  await this.pdfController.optimizeAndExtractText(localPath, s3Key)
+                // Choose processing method based on configuration
+                if (this.config.useNativePdf) {
+                  // Native PDF processing with Claude vision
+                  console.log(`📄 Using Claude native PDF vision for ${pdf.FileName}`)
 
-                // Upload to S3 only if not already uploaded by Textract
-                if (!processingResult.uploadedToS3) {
-                  console.log(`☁️ Uploading processed ${pdf.FileName} to S3...`)
-                  await this.pdfController.uploadOptimizedToS3(processingResult.optimizedPath, s3Key)
+                  const pdfBuffer = fs.readFileSync(localPath)
+                  const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
+                  const extractor = new ClaudeContactExtractor({
+                    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+                    awsRegion: process.env.AWS_REGION,
+                    awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+                    awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+                  })
+
+                  const startTime = Date.now()
+                  const contacts = await extractor.extractContactsFromPDFNative(pdfBuffer, pdf.FileName)
+                  const processingTime = ((Date.now() - startTime) / 1000).toFixed(1)
+
+                  console.log(`✅ Claude native PDF processing complete in ${processingTime}s: ${contacts.length} contacts`)
+
+                  // Add metadata to contacts
+                  const enrichedContacts = contacts.map(c => ({
+                    ...c,
+                    source_file: pdf.FileName,
+                    record_type: applicant
+                  }))
+
+                  // Save to PostgreSQL
+                  if (enrichedContacts.length > 0 && this.postgresContactService) {
+                    console.log(`💾 Saving ${enrichedContacts.length} contacts to PostgreSQL...`)
+                    const insertResult = await this.postgresContactService.bulkInsertContacts(enrichedContacts)
+                    if (insertResult.success) {
+                      console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+                    }
+                  }
+
+                  // Upload original PDF to S3
+                  console.log(`☁️ Uploading PDF to S3: ${s3Key}`)
+                  await this.s3Service.uploadBufferToS3(pdfBuffer, s3Key)
+                  console.log(`✅ Uploaded to S3`)
+
+                  // Cleanup
+                  if (!process.env.KEEP_LOCAL_FILES) {
+                    await this.pdfController.cleanupLocalFile(localPath)
+                  }
+
+                  console.log(`📊 Processing summary for ${pdf.FileName}:`)
+                  console.log(`   - Method: claude-native-pdf-vision`)
+                  console.log(`   - Processing time: ${processingTime}s`)
+                  console.log(`   - Contacts extracted: ${contacts.length}`)
+
                 } else {
-                  console.log(`✅ ${pdf.FileName} already uploaded to S3 by Textract`)
-                }
+                  // Traditional Ghostscript + Textract processing
+                  const processingResult = this.pdfController.config.smartProcessing ?
+                    await this.pdfController.smartOptimizeAndExtract(localPath, s3Key) :
+                    await this.pdfController.optimizeAndExtractText(localPath, s3Key)
 
-                console.log(`📊 Processing summary for ${pdf.FileName}:`)
-                console.log(`   - Optimization: ${processingResult.wasOptimized ? 'Yes' : 'No'}`)
-                console.log(`   - Text extracted: ${processingResult.textLength} characters`)
-                console.log(`   - Method: ${processingResult.method}`)
-                console.log(`   - Steps: ${processingResult.processingSteps.join(' → ')}`)
+                  // Upload to S3 only if not already uploaded by Textract
+                  if (!processingResult.uploadedToS3) {
+                    console.log(`☁️ Uploading processed ${pdf.FileName} to S3...`)
+                    await this.pdfController.uploadOptimizedToS3(processingResult.optimizedPath, s3Key)
+                  } else {
+                    console.log(`✅ ${pdf.FileName} already uploaded to S3 by Textract`)
+                  }
 
-                if (!process.env.KEEP_LOCAL_FILES) {
-                  await this.pdfController.cleanupLocalFile(localPath)
-                  if (processingResult.optimizedPath !== localPath) {
-                    await this.pdfController.cleanupLocalFile(processingResult.optimizedPath)
+                  console.log(`📊 Processing summary for ${pdf.FileName}:`)
+                  console.log(`   - Optimization: ${processingResult.wasOptimized ? 'Yes' : 'No'}`)
+                  console.log(`   - Text extracted: ${processingResult.textLength} characters`)
+                  console.log(`   - Method: ${processingResult.method}`)
+                  console.log(`   - Steps: ${processingResult.processingSteps.join(' → ')}`)
+
+                  if (!process.env.KEEP_LOCAL_FILES) {
+                    await this.pdfController.cleanupLocalFile(localPath)
+                    if (processingResult.optimizedPath !== localPath) {
+                      await this.pdfController.cleanupLocalFile(processingResult.optimizedPath)
+                    }
+                    if (processingResult.textPath) {
+                      await this.pdfController.cleanupLocalFile(processingResult.textPath)
+                    }
                   }
-                  if (processingResult.textPath) {
-                    await this.pdfController.cleanupLocalFile(processingResult.textPath)
-                  }
+
+                  this.pdfController.processingResults = this.pdfController.processingResults || []
+                  this.pdfController.processingResults.push({
+                    filename: pdf.FileName,
+                    applicant: applicant,
+                    s3Key: s3Key,
+                    ...processingResult
+                  })
                 }
 
                 console.log(`✅ Locally processed and uploaded: ${pdf.FileName}`)
-
-                this.pdfController.processingResults = this.pdfController.processingResults || []
-                this.pdfController.processingResults.push({
-                  filename: pdf.FileName,
-                  applicant: applicant,
-                  s3Key: s3Key,
-                  ...processingResult
-                })
               } else {
                 console.log(`⬇️ Uploading ${pdf.FileName} directly to S3...`)
                 await this.s3Service.uploadToS3(pdf.Url, s3Key)
@@ -224,6 +279,119 @@ class EmnrdController {
       res.status(500).json({
         success: false,
         message: error.message
+      })
+    }
+  }
+
+  /**
+   * Upload and process a single PDF with Claude's native PDF vision (no OCR/Textract)
+   * Accepts multipart/form-data file upload
+   */
+  async uploadAndProcessNative(req, res) {
+    let uploadedFilePath = null
+
+    try {
+      // Check if file was uploaded
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: 'No PDF file uploaded. Please upload a PDF file with field name "pdf"'
+        })
+      }
+
+      uploadedFilePath = req.file.path
+      const originalName = req.file.originalname
+      const applicantName = req.body.applicant || 'manual-upload'
+
+      console.log(`📤 Received upload for native PDF processing: ${originalName} (${req.file.size} bytes)`)
+      console.log(`📋 Applicant: ${applicantName}`)
+
+      // Read PDF buffer
+      const pdfBuffer = fs.readFileSync(uploadedFilePath)
+
+      // S3 key for upload
+      const s3Key = `pdfs/${applicantName}/${originalName}`
+
+      // Process with Claude's native PDF vision
+      console.log(`🔄 Processing with Claude native PDF vision...`)
+      const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
+      const extractor = new ClaudeContactExtractor({
+        anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+        awsRegion: process.env.AWS_REGION,
+        awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+      })
+
+      const startTime = Date.now()
+      const contacts = await extractor.extractContactsFromPDFNative(pdfBuffer, originalName)
+      const processingTime = ((Date.now() - startTime) / 1000).toFixed(1)
+
+      console.log(`✅ Claude native PDF processing complete in ${processingTime}s: ${contacts.length} contacts`)
+
+      // Add metadata to contacts
+      const enrichedContacts = contacts.map(c => ({
+        ...c,
+        source_file: originalName,
+        record_type: applicantName
+      }))
+
+      // Save to PostgreSQL
+      if (enrichedContacts.length > 0 && this.postgresContactService) {
+        console.log(`💾 Saving ${enrichedContacts.length} contacts to PostgreSQL...`)
+        const insertResult = await this.postgresContactService.bulkInsertContacts(enrichedContacts)
+
+        if (insertResult.success) {
+          console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+        }
+      }
+
+      // Upload original PDF to S3
+      console.log(`☁️ Uploading PDF to S3: ${s3Key}`)
+      await this.s3Service.uploadBufferToS3(pdfBuffer, s3Key)
+      console.log(`✅ Uploaded to S3`)
+
+      // Cleanup local file
+      if (!process.env.KEEP_LOCAL_FILES && fs.existsSync(uploadedFilePath)) {
+        fs.unlinkSync(uploadedFilePath)
+        console.log(`🗑️ Removed local file: ${uploadedFilePath}`)
+      }
+
+      const result = {
+        success: true,
+        file: originalName,
+        applicant: applicantName,
+        s3Key: s3Key,
+        processing: {
+          method: 'claude-native-pdf-vision',
+          processingTime: `${processingTime}s`,
+          pdfSizeKB: (pdfBuffer.length / 1024).toFixed(1)
+        },
+        contacts: {
+          count: enrichedContacts.length,
+          contacts: enrichedContacts
+        },
+        timestamp: new Date().toISOString()
+      }
+
+      return res.status(200).json(result)
+
+    } catch (error) {
+      console.error(`❌ Native PDF processing failed: ${error.message}`)
+      console.error(error.stack)
+
+      // Cleanup on error
+      try {
+        if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+          fs.unlinkSync(uploadedFilePath)
+        }
+      } catch (cleanupErr) {
+        console.error(`❌ Cleanup error: ${cleanupErr.message}`)
+      }
+
+      return res.status(500).json({
+        success: false,
+        message: `Native PDF processing failed: ${error.message}`,
+        error: error.stack
       })
     }
   }
@@ -569,8 +737,9 @@ module.exports.controller = (app) => {
   app.get('/v1/running', (req, res) => emnrdController.getStatus(req, res))
   app.get('/v1/force', (req, res) => emnrdController.test(req, res))
 
-  // Single file upload endpoint - uses multer middleware
+  // Single file upload endpoints - uses multer middleware
   app.post('/v1/emnrd/upload-and-process', upload.single('pdf'), (req, res) => emnrdController.uploadAndProcess(req, res))
+  app.post('/v1/emnrd/upload-and-process-native', upload.single('pdf'), (req, res) => emnrdController.uploadAndProcessNative(req, res))
 
   // Debug endpoints
   app.get('/v1/debug-methods', (req, res) => emnrdController.debugMethods(req, res))

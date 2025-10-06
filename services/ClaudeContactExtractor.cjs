@@ -468,6 +468,160 @@ class ClaudeContactExtractor {
   /**
    * Use Claude to extract contact information from text
    */
+  /**
+   * Extract contacts directly from PDF using Claude's native PDF vision capabilities
+   * @param {Buffer} pdfBuffer - PDF file as buffer
+   * @param {string} filename - Original filename for reference
+   * @returns {Promise<Array>} - Array of extracted contacts
+   */
+  async extractContactsFromPDFNative(pdfBuffer, filename = 'document.pdf', retryCount = 0) {
+    const maxRetries = 3
+    const baseDelay = 2000 // 2 seconds
+
+    const prompt = `Extract contact information from this oil & gas PDF document. Return JSON array only.
+
+EXTRACT:
+- Names (individuals, companies, trusts)
+- Complete addresses
+- Phone/email if present
+- Ownership info (percentages, interest types)
+
+PRIORITY SOURCES (extract ALL):
+- Postal delivery tables/certified mail lists
+- Transaction report, Transaction Report Details
+- Interest owner tables (WI, ORRI, MI, UMI owners)
+- Revenue/mailing lists
+
+EXCLUDE (skip entirely):
+- Attorneys, lawyers, law firms
+- Legal professionals (Esq., J.D., P.C., P.A., PLLC, LLP)
+- Legal services/representatives
+EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, not lawyers)
+
+POSTAL TABLES:
+- Ignore tracking numbers
+- Extract recipient names + addresses
+- Extract names + addresses
+- Combine address components
+- Trusts go in "company" field with full dtd notation
+
+JSON FORMAT:
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Complete address",
+  "phone": "Phone with type",
+  "email": "Email if present",
+  "ownership_info": "Percentages/fractions",
+  "interest_type": "WI/ORRI/MI/etc",
+  "notes": "Additional details",
+  "record_type": "individual/company/joint",
+  "document_section": "Source table/section"
+}
+
+Requirements:
+- Must have name/company AND address
+- Remove duplicates
+- When uncertain if legal professional, exclude UNLESS from postal/interest table
+- No text outside JSON array`;
+
+    try {
+      this.logger.info(`🚀 Calling Claude API with native PDF processing (attempt ${retryCount + 1}) for ${filename}...`)
+      this.logger.info(`📄 PDF size: ${(pdfBuffer.length / 1024).toFixed(1)} KB`)
+
+      const response = await this.anthropic.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 8000,
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: pdfBuffer.toString('base64')
+              }
+            },
+            {
+              type: "text",
+              text: prompt
+            }
+          ]
+        }]
+      });
+
+      const responseText = response.content[0].text;
+
+      // Extract JSON from response
+      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        const contacts = JSON.parse(jsonMatch[0]);
+        const validContacts = Array.isArray(contacts) ? contacts : [];
+        this.logger.info(`✅ Claude native PDF processing successful: extracted ${validContacts.length} contacts`);
+        return validContacts;
+      } else {
+        this.logger.warn('No JSON array found in Claude response');
+        return [];
+      }
+
+    } catch (error) {
+      this.logger.error('Error processing PDF with Claude native:', error.message);
+
+      // Handle rate limit (429) and overloaded (529) errors with exponential backoff
+      if ((error.status === 429 || error.status === 529) && retryCount < maxRetries) {
+        const delay = baseDelay * Math.pow(2, retryCount)
+        this.logger.warn(`Claude ${error.status === 529 ? 'overloaded (529)' : 'rate limited (429)'}, waiting ${delay/1000}s before retry ${retryCount + 1}/${maxRetries}...`);
+
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return await this.extractContactsFromPDFNative(pdfBuffer, filename, retryCount + 1);
+
+      } else if (error.status === 429 || error.status === 529) {
+        const longDelay = error.status === 529 ? 30000 : 60000
+        this.logger.warn(`Claude ${error.status === 529 ? 'overloaded' : 'rate limited'}, final retry in ${longDelay/1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, longDelay));
+
+        try {
+          const retryResponse = await this.anthropic.messages.create({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 8000,
+            messages: [{
+              role: "user",
+              content: [
+                {
+                  type: "document",
+                  source: {
+                    type: "base64",
+                    media_type: "application/pdf",
+                    data: pdfBuffer.toString('base64')
+                  }
+                },
+                {
+                  type: "text",
+                  text: prompt
+                }
+              ]
+            }]
+          });
+
+          const responseText = retryResponse.content[0].text;
+          const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const contacts = JSON.parse(jsonMatch[0]);
+            this.logger.info(`✅ Claude native PDF final retry successful: ${contacts.length} contacts`);
+            return Array.isArray(contacts) ? contacts : [];
+          }
+        } catch (retryError) {
+          this.logger.error(`Final retry also failed: ${retryError.message}`);
+        }
+      }
+
+      return [];
+    }
+  }
+
   async extractContactInfoWithClaude(textContent, retryCount = 0) {
     const maxRetries = 3
     const baseDelay = 2000 // 2 seconds
