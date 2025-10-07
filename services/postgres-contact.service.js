@@ -350,7 +350,9 @@ class PostgresContactService {
         state,
         requireFirstName = false,
         requireLastName = false,
-        requireBothNames = false
+        requireBothNames = false,
+        sortBy = 'created_at',
+        sortOrder = 'DESC'
       } = options;
 
       const where = {};
@@ -375,11 +377,21 @@ class PostgresContactService {
         }
       }
 
+      // Validate sortBy to prevent SQL injection
+      const allowedSortFields = [
+        'id', 'name', 'first_name', 'last_name', 'llc_owner',
+        'company', 'city', 'state', 'acknowledged', 'islegal',
+        'created_at', 'updated_at'
+      ];
+
+      const sortField = allowedSortFields.includes(sortBy) ? sortBy : 'created_at';
+      const sortDirection = ['ASC', 'DESC'].includes(sortOrder.toUpperCase()) ? sortOrder.toUpperCase() : 'DESC';
+
       const result = await this.Contact.findAndCountAll({
         where,
         limit,
         offset,
-        order: [['created_at', 'DESC']]
+        order: [[sortField, sortDirection]]
       });
 
       return {
@@ -387,7 +399,9 @@ class PostgresContactService {
         contacts: result.rows,
         total: result.count,
         limit,
-        offset
+        offset,
+        sortBy: sortField,
+        sortOrder: sortDirection
       };
     } catch (error) {
       return {

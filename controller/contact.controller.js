@@ -112,7 +112,9 @@ class ContactController {
         state,
         requireFirstName,
         requireLastName,
-        requireBothNames
+        requireBothNames,
+        sortBy = 'created_at',
+        sortOrder = 'DESC'
       } = req.query
 
       const result = await this.postgresContactService.searchContacts({
@@ -126,7 +128,9 @@ class ContactController {
         state,
         requireFirstName: requireFirstName === 'true',
         requireLastName: requireLastName === 'true',
-        requireBothNames: requireBothNames === 'true'
+        requireBothNames: requireBothNames === 'true',
+        sortBy,
+        sortOrder: sortOrder.toUpperCase()
       })
 
       res.status(200).json(result)
