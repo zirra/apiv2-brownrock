@@ -526,6 +526,7 @@ EXTRACT:
 - Complete addresses
 - Phone/email if present
 - Ownership info (percentages, interest types)
+- Mineral rights ownership percentage (as decimal, e.g., 25.5 for 25.5%)
 
 PRIORITY SOURCES (extract ALL):
 - Postal delivery tables/certified mail lists
@@ -555,12 +556,25 @@ JSON FORMAT:
   "address": "Complete address",
   "phone": "Phone with type",
   "email": "Email if present",
-  "ownership_info": "Percentages/fractions",
-  "interest_type": "WI/ORRI/MI/etc",
+  "ownership_info": "Percentages/fractions (keep for reference)",
+  "mineral_rights_percentage": "Ownership % as decimal (0-100), null if not specified",
+  "ownership_type": "WI, ORRI, or UMI only (null if other or unspecified)",
   "notes": "Additional details",
   "record_type": "individual/company/joint",
   "document_section": "Source table/section"
 }
+
+OWNERSHIP TYPE MAPPING:
+- WI = Working Interest
+- ORRI = Overriding Royalty Interest
+- UMI = Unleased Mineral Interest
+- Only use these three codes, set to null for any other type
+
+PERCENTAGE EXTRACTION:
+- Convert fractions to decimals (e.g., 1/4 = 25.0, 3/8 = 37.5)
+- Extract percentages as numbers (e.g., "25.5%" becomes 25.5)
+- If multiple percentages exist, use the primary/largest one
+- Set to null if no percentage information found
 
 Requirements:
 - Must have name/company AND address
@@ -704,12 +718,24 @@ EXTRACT:
 - Complete addresses
 - Phone/email if present
 - Ownership info (percentages, interest types)
+- Mineral rights ownership percentage (as decimal, e.g., 25.5 for 25.5%)
 
 PRIORITY SOURCES (extract ALL):
 - Postal delivery tables/certified mail lists
 - Transaction report, Transaction Report Details
 - Interest owner tables (WI, ORRI, MI, UMI owners)
 - Revenue/mailing lists
+- **Tract ownership breakdowns (pages with "Summary of Interests" by tract)**
+- **Unit-level ownership summaries (consolidated ownership across all tracts)**
+
+OWNERSHIP STRUCTURE:
+- Units contain multiple Tracts
+- Extract BOTH tract-level AND unit-level ownership
+- Unit-level summary typically appears as:
+  * "Summary of Interests"
+  * "Matador Working Interest" / "Voluntary Joinder" / "Compulsory Pool Interest"
+  * Tables showing working interest percentages by tract
+  * Overall interest owner breakdowns
 
 EXCLUDE (skip entirely):
 - Attorneys, lawyers, law firms
@@ -720,7 +746,6 @@ EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, 
 POSTAL TABLES:
 - Ignore tracking numbers
 - Extract recipient names + addresses
-- Extract names + addresses
 - Combine address components
 - Trusts go in "company" field with full dtd notation
 
@@ -733,17 +758,38 @@ JSON FORMAT:
   "address": "Complete address",
   "phone": "Phone with type",
   "email": "Email if present",
-  "ownership_info": "Percentages/fractions",
-  "interest_type": "WI/ORRI/MI/etc",
+  "ownership_info": "Percentages/fractions (keep for reference)",
+  "mineral_rights_percentage": "Ownership % as decimal (0-100), null if not specified",
+  "ownership_type": "WI, ORRI, or UMI only (null if other or unspecified)",
+  "tract_info": "Tract number(s) if tract-level data",
+  "unit_level": true/false,
   "notes": "Additional details",
   "record_type": "individual/company/joint",
-  "document_section": "Source table/section"
+  "document_section": "Source table/section (e.g., 'Tract 1', 'Unit Summary', 'Postal Table')"
 }
 
+OWNERSHIP TYPE MAPPING:
+- WI = Working Interest
+- ORRI = Overriding Royalty Interest
+- UMI = Unleased Mineral Interest
+- Only use these three codes, set to null for any other type (including MI, Committed, Uncommitted)
+
+PERCENTAGE EXTRACTION:
+- Convert fractions to decimals (e.g., 1/4 = 25.0, 3/8 = 37.5)
+- Extract percentages as numbers (e.g., "25.5%" becomes 25.5)
+- If multiple percentages exist, use the primary/largest one
+- Set to null if no percentage information found
+
+OWNERSHIP PRIORITY:
+1. Extract unit-level summary first (this is the overall ownership across all tracts)
+2. Then extract individual tract breakdowns
+3. Mark unit_level: true for consolidated ownership, false for tract-specific
+
 Requirements:
-- Must have name/company AND address
-- Remove duplicates
+- Must have name/company AND (address OR ownership_info)
+- Remove duplicates (same owner across multiple tracts = one record with all tracts listed)
 - When uncertain if legal professional, exclude UNLESS from postal/interest table
+- For owners appearing in multiple tracts, consolidate into single record with all tract numbers
 - No text outside JSON array
 
 Text content:
@@ -1014,6 +1060,7 @@ ${textContent}
       contacts.forEach(contact => {
         contact.source_file = pdfKey;
         contact.processed_date = timestamp;
+        contact.project_origin = 'OCD Imaging';
       });
 
       this.logger.info(`Extracted ${contacts.length} contacts from ${pdfKey}`);

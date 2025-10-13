@@ -233,6 +233,28 @@ class Contact extends Model {
         validate: {
           len: [0, 500]
         }
+      },
+      mineral_rights_percentage: {
+        type: DataTypes.DECIMAL(5, 2),
+        allowNull: true,
+        validate: {
+          min: 0,
+          max: 100
+        }
+      },
+      ownership_type: {
+        type: DataTypes.STRING(10),
+        allowNull: true,
+        validate: {
+          isIn: [['WI', 'ORRI', 'UMI', null]]
+        }
+      },
+      project_origin: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+        validate: {
+          len: [0, 255]
+        }
       }
     }, {
       sequelize,
@@ -260,6 +282,15 @@ class Contact extends Model {
         },
         {
           fields: ['islegal']
+        },
+        {
+          fields: ['ownership_type']
+        },
+        {
+          fields: ['project_origin']
+        },
+        {
+          fields: ['mineral_rights_percentage']
         }
       ]
     });

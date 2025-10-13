@@ -7,6 +7,7 @@ const {
   ConfirmSignUpCommand,
   InitiateAuthCommand,
   ResendConfirmationCodeCommand,
+  ChangePasswordCommand,
   GetUserCommand,
   SignUpCommand } = require("@aws-sdk/client-cognito-identity-provider")
 const credentials = { accessKeyId:process.env.ACCESS_KEY_ID }
@@ -113,6 +114,23 @@ const Login = {
 
   async refresh (req, res) {
     res.status(200).send('success')
+  },
+  async changeUserPassword (req, res) {
+
+    const { accessToken, previousPassword, proposedPassword} = req.body
+    const command = new ChangePasswordCommand({
+      AccessToken: accessToken,
+      PreviousPassword: previousPassword,
+      ProposedPassword: proposedPassword,
+    })
+
+    try {
+      await client.send(command)
+      console.log("Password updated successfully")
+    } catch (error) {
+      console.error("Failed to change password", error)
+      throw error
+    }
   }
 
 }

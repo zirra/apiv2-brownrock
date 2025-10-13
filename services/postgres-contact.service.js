@@ -68,6 +68,9 @@ class PostgresContactService {
       record_type: claudeContact.record_type || null,
       document_section: claudeContact.document_section || null,
       source_file: claudeContact.source_file || null,
+      mineral_rights_percentage: claudeContact.mineral_rights_percentage || null,
+      ownership_type: claudeContact.ownership_type || null,
+      project_origin: claudeContact.project_origin || null,
       acknowledged: false,
       islegal: this.isLegalEntity(claudeContact)
     };
@@ -348,6 +351,7 @@ class PostgresContactService {
         islegal,
         city,
         state,
+        search, // New: search across all fields
         requireFirstName = false,
         requireLastName = false,
         requireBothNames = false,
@@ -356,6 +360,27 @@ class PostgresContactService {
       } = options;
 
       const where = {};
+
+      // Global search across multiple fields
+      if (search) {
+        const searchTerm = `%${search}%`;
+        where[this.sequelize.Sequelize.Op.or] = [
+          { name: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { first_name: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { last_name: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { llc_owner: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { phone1: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { email1: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { address: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { city: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { state: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { zip: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { notes: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { record_type: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { document_section: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { source_file: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } }
+        ];
+      }
 
       if (name) where.name = { [this.sequelize.Sequelize.Op.iLike]: `%${name}%` };
       if (company) where.llc_owner = { [this.sequelize.Sequelize.Op.iLike]: `%${company}%` };
