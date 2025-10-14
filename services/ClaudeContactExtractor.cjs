@@ -1060,7 +1060,7 @@ ${textContent}
       contacts.forEach(contact => {
         contact.source_file = pdfKey;
         contact.processed_date = timestamp;
-        contact.project_origin = 'OCD Imaging';
+        contact.project_origin = 'OCD_IMAGING';
       });
 
       this.logger.info(`Extracted ${contacts.length} contacts from ${pdfKey}`);
