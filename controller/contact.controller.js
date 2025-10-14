@@ -419,7 +419,15 @@ class ContactController {
         })
       }
 
-      const { id, acknowledged, islegal } = req.body
+      const {
+        id,
+        acknowledged,
+        islegal,
+        mineral_rights_percentage,
+        ownership_type,
+        project_origin,
+        notes
+      } = req.body
 
       if (!id) {
         return res.status(400).json({
@@ -432,11 +440,15 @@ class ContactController {
       const updates = {}
       if (acknowledged !== undefined) updates.acknowledged = acknowledged
       if (islegal !== undefined) updates.islegal = islegal
+      if (mineral_rights_percentage !== undefined) updates.mineral_rights_percentage = mineral_rights_percentage
+      if (ownership_type !== undefined) updates.ownership_type = ownership_type
+      if (project_origin !== undefined) updates.project_origin = project_origin
+      if (notes !== undefined) updates.notes = notes
 
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({
           success: false,
-          message: 'At least one field (acknowledged or islegal) must be provided'
+          message: 'At least one updatable field must be provided'
         })
       }
 
