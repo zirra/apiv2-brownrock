@@ -722,11 +722,20 @@ EXTRACT:
 
 PRIORITY SOURCES (extract ALL):
 - Postal delivery tables/certified mail lists
-- Transaction report, Transaction Report Details
+- Transaction report, Transaction Report Details, CertifiedPro.net reports
+- **Tables with columns like "Name 1", "Name 2", "Address1", "Address2" - these are recipient lists**
 - Interest owner tables (WI, ORRI, MI, UMI owners)
 - Revenue/mailing lists
 - **Tract ownership breakdowns (pages with "Summary of Interests" by tract)**
 - **Unit-level ownership summaries (consolidated ownership across all tracts)**
+
+SPECIAL FORMATS:
+- **For tables with "Name 1" and "Name 2" columns:**
+  * Combine Name 1 and Name 2 as a single entity
+  * If Name 2 is blank, use only Name 1
+  * Example: Name 1="Bureau of Land Management", Name 2="Department of the Interior, USA" → company="Bureau of Land Management, Department of the Interior, USA"
+- Combine Address1 and Address2 fields into complete address
+- Extract all rows regardless of "Mailing Status" column
 
 OWNERSHIP STRUCTURE:
 - Units contain multiple Tracts
@@ -744,9 +753,9 @@ EXCLUDE (skip entirely):
 EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, not lawyers)
 
 POSTAL TABLES:
-- Ignore tracking numbers
-- Extract recipient names + addresses
-- Combine address components
+- Ignore tracking numbers, USPS Article Numbers, mailing dates, reference numbers
+- Extract recipient names from ANY name field (Name, Name 1, Name 2, Recipient Name)
+- Combine all address components (Address1, Address2, Street Address, City, State, Zip)
 - Trusts go in "company" field with full dtd notation
 
 JSON FORMAT:
@@ -765,7 +774,7 @@ JSON FORMAT:
   "unit_level": true/false,
   "notes": "Additional details",
   "record_type": "individual/company/joint",
-  "document_section": "Source table/section (e.g., 'Tract 1', 'Unit Summary', 'Postal Table')"
+  "document_section": "Source table/section (e.g., 'Tract 1', 'Unit Summary', 'Postal Table', 'Transaction Report')"
 }
 
 OWNERSHIP TYPE MAPPING:
@@ -790,6 +799,7 @@ Requirements:
 - Remove duplicates (same owner across multiple tracts = one record with all tracts listed)
 - When uncertain if legal professional, exclude UNLESS from postal/interest table
 - For owners appearing in multiple tracts, consolidate into single record with all tract numbers
+- **Process every row in postal/transaction tables even if status shows "Mailed", "Delivered", or other**
 - No text outside JSON array
 
 Text content:
