@@ -162,11 +162,14 @@ OWNERSHIP PRIORITY:
 3. Mark unit_level: true for consolidated ownership, false for tract-specific
 
 Requirements:
-- Must have name/company AND (address OR ownership_info)
-- Remove duplicates (same owner across multiple tracts = one record with all tracts listed)
+- Must have name/company AND (address OR be listed in Chronology of Contacts or recapitulation table)
+- If no address available, include party if they appear in:
+  * Chronology of Contacts section (even with N/A address)
+  * Recapitulation/ownership tables with interest type
+  * Mark as "address_unknown": true in notes field
+- Remove duplicates
 - When uncertain if legal professional, exclude UNLESS from postal/interest table
-- For owners appearing in multiple tracts, consolidate into single record with all tract numbers
-- **Process every row in postal/transaction tables even if status shows "Mailed", "Delivered", or other**
+- For parties marked "Stranger in title" or "Notify" status, include them with whatever information is available
 - No text outside JSON array
 
 Text content:
