@@ -7,6 +7,7 @@ const { execSync } = require('child_process');
 const TableName = process.env.DYNAMO_TABLE
 const DynamoClient = require('../config/dynamoclient.cjs')
 const PostgresContactService = require('./postgres-contact.service.js')
+const extractionPrompts = require('../prompts/extraction-prompts.js')
 require('dotenv').config()
 
 const {
@@ -47,10 +48,55 @@ class ClaudeContactExtractor {
       usePostgres: process.env.USE_POSTGRES !== 'false' // Default to true
     }
 
+    // Prompt configuration
+    this.documentType = config.documentType || process.env.DEFAULT_DOCUMENT_TYPE || 'oil-gas-contacts'
+    this.customPrompts = config.customPrompts || null
+    this.promptVariables = config.promptVariables || {
+      PROJECT_ORIGIN: process.env.DEFAULT_PROJECT_ORIGIN || 'OCD_IMAGING'
+    }
+
     // Initialize PostgreSQL service
     if (this.processingConfig.usePostgres) {
       this.postgresService = new PostgresContactService()
     }
+  }
+
+  /**
+   * Get prompt for extraction based on document type and mode
+   * @param {string} mode - 'native' for PDF vision or 'text' for extracted text
+   * @returns {string} - The prompt text
+   */
+  getPrompt(mode) {
+    // If custom prompts provided, use those
+    if (this.customPrompts && this.customPrompts[mode]) {
+      return this.substitutePromptVariables(this.customPrompts[mode])
+    }
+
+    // Otherwise use predefined prompts from library
+    const prompts = extractionPrompts[this.documentType]
+    if (!prompts) {
+      this.logger.warn(`⚠️ Unknown document type: ${this.documentType}, falling back to oil-gas-contacts`)
+      return this.substitutePromptVariables(extractionPrompts['oil-gas-contacts'][mode])
+    }
+
+    return this.substitutePromptVariables(prompts[mode])
+  }
+
+  /**
+   * Substitute template variables in prompts
+   * @param {string} prompt - Prompt template with ${VARIABLE} placeholders
+   * @returns {string} - Prompt with variables replaced
+   */
+  substitutePromptVariables(prompt) {
+    let result = prompt
+
+    // Replace known variables
+    for (const [key, value] of Object.entries(this.promptVariables)) {
+      const placeholder = `\${${key}}`
+      result = result.replace(new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), value)
+    }
+
+    return result
   }
 
   
@@ -186,6 +232,151 @@ class ClaudeContactExtractor {
         error: error.message,
         method: 'textract',
         uploadedToS3: false
+      }
+    }
+  }
+
+  /**
+   * Parse Textract response blocks into markdown-formatted tables
+   * @param {Array} blocks - Textract response blocks
+   * @returns {Object} - Object with tables array and text summary
+   */
+  parseTextractTables(blocks) {
+    const tables = []
+    const tableMap = new Map() // Map of TABLE id to its structure
+    const cellMap = new Map()  // Map of CELL id to its content
+
+    try {
+      // First pass: identify all tables and cells
+      for (const block of blocks) {
+        if (block.BlockType === 'TABLE') {
+          tableMap.set(block.Id, {
+            id: block.Id,
+            confidence: block.Confidence,
+            page: block.Page || 1,
+            relationships: block.Relationships || [],
+            cells: []
+          })
+        } else if (block.BlockType === 'CELL') {
+          const cellContent = {
+            id: block.Id,
+            rowIndex: block.RowIndex,
+            columnIndex: block.ColumnIndex,
+            rowSpan: block.RowSpan || 1,
+            columnSpan: block.ColumnSpan || 1,
+            confidence: block.Confidence,
+            text: '',
+            relationships: block.Relationships || []
+          }
+          cellMap.set(block.Id, cellContent)
+        }
+      }
+
+      // Second pass: extract cell text from WORD blocks
+      for (const block of blocks) {
+        if (block.BlockType === 'WORD') {
+          // Find which cell this word belongs to
+          for (const [cellId, cell] of cellMap.entries()) {
+            const relationship = cell.relationships.find(
+              rel => rel.Type === 'CHILD' && rel.Ids && rel.Ids.includes(block.Id)
+            )
+            if (relationship) {
+              cell.text += (cell.text ? ' ' : '') + block.Text
+            }
+          }
+        }
+      }
+
+      // Third pass: organize cells into tables
+      for (const [tableId, table] of tableMap.entries()) {
+        const childRelationship = table.relationships.find(rel => rel.Type === 'CHILD')
+        if (childRelationship && childRelationship.Ids) {
+          for (const cellId of childRelationship.Ids) {
+            const cell = cellMap.get(cellId)
+            if (cell) {
+              table.cells.push(cell)
+            }
+          }
+        }
+      }
+
+      // Fourth pass: convert each table to markdown
+      for (const [tableId, table] of tableMap.entries()) {
+        if (table.cells.length === 0) continue
+
+        // Sort cells by row and column
+        table.cells.sort((a, b) => {
+          if (a.rowIndex !== b.rowIndex) {
+            return a.rowIndex - b.rowIndex
+          }
+          return a.columnIndex - b.columnIndex
+        })
+
+        // Determine table dimensions
+        const maxRow = Math.max(...table.cells.map(c => c.rowIndex))
+        const maxCol = Math.max(...table.cells.map(c => c.columnIndex))
+
+        // Build 2D array for the table
+        const tableArray = Array.from({ length: maxRow }, () =>
+          Array.from({ length: maxCol }, () => '')
+        )
+
+        // Fill in cell data (handling spans)
+        for (const cell of table.cells) {
+          const rowIdx = cell.rowIndex - 1 // Convert to 0-based
+          const colIdx = cell.columnIndex - 1 // Convert to 0-based
+
+          if (rowIdx >= 0 && colIdx >= 0 && rowIdx < maxRow && colIdx < maxCol) {
+            tableArray[rowIdx][colIdx] = cell.text.trim()
+
+            // Handle column spans by filling adjacent cells
+            for (let span = 1; span < cell.columnSpan; span++) {
+              if (colIdx + span < maxCol) {
+                tableArray[rowIdx][colIdx + span] = '' // Mark as spanned
+              }
+            }
+          }
+        }
+
+        // Convert to markdown
+        let markdown = `\n**Table from Page ${table.page}** (Confidence: ${table.confidence.toFixed(1)}%)\n\n`
+
+        // Add header row
+        markdown += '| ' + tableArray[0].join(' | ') + ' |\n'
+        markdown += '| ' + tableArray[0].map(() => '---').join(' | ') + ' |\n'
+
+        // Add data rows
+        for (let i = 1; i < tableArray.length; i++) {
+          markdown += '| ' + tableArray[i].join(' | ') + ' |\n'
+        }
+
+        tables.push({
+          page: table.page,
+          confidence: table.confidence,
+          markdown: markdown,
+          rowCount: maxRow,
+          columnCount: maxCol,
+          cellCount: table.cells.length
+        })
+      }
+
+      this.logger.info(`📊 Parsed ${tables.length} tables from Textract response`)
+
+      return {
+        tables,
+        tableCount: tables.length,
+        summary: tables.map(t =>
+          `Page ${t.page}: ${t.rowCount}x${t.columnCount} table (${t.cellCount} cells, ${t.confidence.toFixed(1)}% confidence)`
+        ).join('\n')
+      }
+
+    } catch (error) {
+      this.logger.error(`❌ Error parsing Textract tables: ${error.message}`)
+      return {
+        tables: [],
+        tableCount: 0,
+        summary: 'Failed to parse tables',
+        error: error.message
       }
     }
   }
@@ -509,6 +700,362 @@ class ClaudeContactExtractor {
   }
 
   /**
+   * Hybrid PDF processing: Textract table extraction + Claude native vision
+   * Splits large PDFs into chunks for Textract, then sends full PDF to Claude with extracted tables
+   * @param {Buffer} pdfBuffer - PDF file as buffer
+   * @param {string} filename - Original filename for reference
+   * @returns {Promise<Array>} - Array of extracted contacts
+   */
+  async extractContactsFromPDFHybrid(pdfBuffer, filename = 'document.pdf') {
+    this.logger.info(`🔀 Starting hybrid PDF processing for ${filename}`)
+    this.logger.info(`📄 PDF size: ${(pdfBuffer.length / 1024 / 1024).toFixed(2)} MB`)
+
+    const sizeThreshold = parseInt(process.env.HYBRID_SIZE_THRESHOLD) || 8388608 // 8MB default
+    const chunkSize = parseInt(process.env.HYBRID_CHUNK_SIZE) || 50 // 50 pages default
+    const tempPrefix = process.env.HYBRID_TEMP_PREFIX || 'temp/'
+
+    let allExtractedTables = []
+    let tableSummary = ''
+
+    try {
+      // Step 1: Extract tables using Textract (split if needed)
+      if (pdfBuffer.length > sizeThreshold) {
+        this.logger.info(`📦 PDF exceeds ${(sizeThreshold / 1024 / 1024).toFixed(1)}MB threshold, splitting for Textract...`)
+
+        // Split PDF into chunks
+        const chunks = await this.splitPDF(pdfBuffer, chunkSize)
+        this.logger.info(`📑 Split PDF into ${chunks.length} chunks of ${chunkSize} pages each`)
+
+        // Process each chunk with Textract
+        for (let i = 0; i < chunks.length; i++) {
+          const chunkBuffer = chunks[i]
+          const tempKey = `${tempPrefix}${filename.replace('.pdf', '')}_chunk_${i}.pdf`
+
+          this.logger.info(`🔍 Processing chunk ${i + 1}/${chunks.length} with Textract...`)
+
+          try {
+            // Save chunk to temp file
+            const tempDir = this.processingConfig.localPdfPath || './temp'
+            if (!fs.existsSync(tempDir)) {
+              fs.mkdirSync(tempDir, { recursive: true })
+            }
+            const tempFilePath = path.join(tempDir, `chunk_${Date.now()}_${i}.pdf`)
+            fs.writeFileSync(tempFilePath, chunkBuffer)
+
+            // Upload chunk to S3
+            await this.uploadFileToS3(tempFilePath, tempKey)
+
+            // Run Textract with retry logic
+            let textractAttempt = 0
+            let textractSuccess = false
+            let textractResponse = null
+
+            while (textractAttempt < 3 && !textractSuccess) {
+              try {
+                if (!this.textractClient) {
+                  const { TextractClient } = require('@aws-sdk/client-textract')
+                  this.textractClient = new TextractClient({
+                    region: this.config.awsRegion || 'us-east-1',
+                    credentials: {
+                      accessKeyId: this.config.awsAccessKeyId,
+                      secretAccessKey: this.config.awsSecretAccessKey
+                    }
+                  })
+                }
+
+                const { AnalyzeDocumentCommand } = require('@aws-sdk/client-textract')
+                const startTime = Date.now()
+
+                const command = new AnalyzeDocumentCommand({
+                  Document: {
+                    S3Object: {
+                      Bucket: process.env.S3_BUCKET_NAME,
+                      Name: tempKey
+                    }
+                  },
+                  FeatureTypes: ['TABLES', 'FORMS']
+                })
+
+                textractResponse = await this.textractClient.send(command)
+                const duration = ((Date.now() - startTime) / 1000).toFixed(1)
+                this.logger.info(`✅ Textract completed chunk ${i + 1} in ${duration}s`)
+                textractSuccess = true
+
+              } catch (textractError) {
+                textractAttempt++
+                this.logger.warn(`⚠️ Textract attempt ${textractAttempt} failed for chunk ${i + 1}: ${textractError.message}`)
+
+                if (textractAttempt < 3) {
+                  const delay = Math.pow(2, textractAttempt) * 1000 // Exponential backoff
+                  this.logger.info(`⏸️ Waiting ${delay / 1000}s before retry...`)
+                  await new Promise(resolve => setTimeout(resolve, delay))
+                } else {
+                  this.logger.error(`❌ Textract failed for chunk ${i + 1} after 3 attempts`)
+                }
+              }
+            }
+
+            // Parse tables from Textract response
+            if (textractSuccess && textractResponse) {
+              const parsedTables = this.parseTextractTables(textractResponse.Blocks || [])
+
+              if (parsedTables.tables.length > 0) {
+                this.logger.info(`📊 Found ${parsedTables.tables.length} tables in chunk ${i + 1}`)
+                allExtractedTables.push(...parsedTables.tables)
+              } else {
+                this.logger.info(`📭 No tables found in chunk ${i + 1}`)
+              }
+            }
+
+            // Cleanup temp file
+            if (fs.existsSync(tempFilePath)) {
+              fs.unlinkSync(tempFilePath)
+            }
+
+            // Delete temp S3 file
+            try {
+              const deleteCommand = new DeleteObjectCommand({
+                Bucket: process.env.S3_BUCKET_NAME,
+                Key: tempKey
+              })
+              await this.s3Client.send(deleteCommand)
+              this.logger.info(`🗑️ Deleted temp S3 file: ${tempKey}`)
+            } catch (deleteError) {
+              this.logger.warn(`⚠️ Failed to delete temp S3 file ${tempKey}: ${deleteError.message}`)
+            }
+
+            // Delay between chunks to avoid rate limits
+            if (i < chunks.length - 1) {
+              this.logger.info(`⏸️ Waiting 2s before next chunk...`)
+              await new Promise(resolve => setTimeout(resolve, 2000))
+            }
+
+          } catch (chunkError) {
+            this.logger.error(`❌ Failed to process chunk ${i + 1}: ${chunkError.message}`)
+            // Continue with other chunks
+          }
+        }
+
+      } else {
+        // Small file - process directly with Textract
+        this.logger.info(`📄 PDF under size threshold, processing directly with Textract...`)
+
+        const tempDir = this.processingConfig.localPdfPath || './temp'
+        if (!fs.existsSync(tempDir)) {
+          fs.mkdirSync(tempDir, { recursive: true })
+        }
+        const tempFilePath = path.join(tempDir, `single_${Date.now()}.pdf`)
+        fs.writeFileSync(tempFilePath, pdfBuffer)
+
+        const tempKey = `${tempPrefix}${filename}`
+        await this.uploadFileToS3(tempFilePath, tempKey)
+
+        try {
+          const textractResult = await this.extractTextWithTextract(tempFilePath, tempKey)
+
+          if (textractResult.extractedText) {
+            // Parse tables from Textract blocks (need to call AnalyzeDocument again to get blocks)
+            this.logger.info(`📊 Parsing tables from Textract response...`)
+            // Note: extractTextWithTextract doesn't return blocks, so we need to make another call
+            // For now, we'll use the text extraction we already have
+          }
+
+          // Cleanup
+          if (fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath)
+          }
+
+          // Delete temp S3 file
+          try {
+            const deleteCommand = new DeleteObjectCommand({
+              Bucket: process.env.S3_BUCKET_NAME,
+              Key: tempKey
+            })
+            await this.s3Client.send(deleteCommand)
+          } catch (deleteError) {
+            this.logger.warn(`⚠️ Failed to delete temp S3 file: ${deleteError.message}`)
+          }
+
+        } catch (textractError) {
+          this.logger.warn(`⚠️ Textract failed: ${textractError.message}`)
+        }
+      }
+
+      // Step 2: Format extracted tables for Claude
+      if (allExtractedTables.length > 0) {
+        this.logger.info(`📊 Total tables extracted: ${allExtractedTables.length}`)
+
+        tableSummary = '\n\n---\n**EXTRACTED TABLES (from Textract - use as reference in case any tables were missed in the PDF):**\n\n'
+        tableSummary += allExtractedTables.map(t => t.markdown).join('\n\n')
+      } else {
+        this.logger.info(`📭 No tables extracted from Textract`)
+        tableSummary = ''
+      }
+
+      // Step 3: Send PDF to Claude with table supplement (handle 100-page limit)
+      this.logger.info(`🚀 Preparing to send PDF to Claude with ${allExtractedTables.length} supplementary tables...`)
+
+      // Check PDF page count (Claude has 100-page limit)
+      const { PDFDocument } = require('pdf-lib')
+      const pdfDoc = await PDFDocument.load(pdfBuffer)
+      const totalPages = pdfDoc.getPageCount()
+
+      this.logger.info(`📄 PDF has ${totalPages} pages (Claude limit: 100 pages)`)
+
+      let allClaudeContacts = []
+
+      if (totalPages > 100) {
+        // PDF exceeds Claude's 100-page limit, split and process chunks
+        this.logger.warn(`⚠️ PDF exceeds Claude's 100-page limit, splitting into chunks...`)
+
+        // Use smaller chunks to avoid token limit issues with dense PDFs
+        // Default to 50 pages (much safer than 100-page limit for token count)
+        const claudeChunkSize = parseInt(process.env.HYBRID_CLAUDE_CHUNK_SIZE) || 50
+        const claudeChunks = await this.splitPDF(pdfBuffer, claudeChunkSize)
+        this.logger.info(`📑 Split PDF into ${claudeChunks.length} chunks of ${claudeChunkSize} pages for Claude processing`)
+
+        // For large PDFs, skip table data to avoid token limits
+        // Claude's vision can see the tables directly in the PDF
+        const basePrompt = this.getPrompt('native')
+        let prompt
+
+        if (allExtractedTables.length > 20) {
+          // Too many tables would exceed token limit
+          this.logger.warn(`⚠️ ${allExtractedTables.length} tables found - omitting from prompt to avoid token limit`)
+          this.logger.info(`📊 Claude will extract tables directly from PDF using vision`)
+          prompt = basePrompt
+        } else if (tableSummary.length > 50000) {
+          // Table data is too large
+          this.logger.warn(`⚠️ Table data too large (${(tableSummary.length / 1000).toFixed(1)}K chars) - omitting to avoid token limit`)
+          this.logger.info(`📊 Claude will extract tables directly from PDF using vision`)
+          prompt = basePrompt
+        } else {
+          // Include tables - within limits
+          this.logger.info(`📊 Including ${allExtractedTables.length} tables in prompt`)
+          prompt = basePrompt + tableSummary
+        }
+
+        for (let i = 0; i < claudeChunks.length; i++) {
+          this.logger.info(`🔄 Processing Claude chunk ${i + 1}/${claudeChunks.length}...`)
+
+          try {
+            const response = await this.anthropic.messages.create({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 8000,
+              messages: [{
+                role: "user",
+                content: [
+                  {
+                    type: "document",
+                    source: {
+                      type: "base64",
+                      media_type: "application/pdf",
+                      data: claudeChunks[i].toString('base64')
+                    }
+                  },
+                  {
+                    type: "text",
+                    text: prompt
+                  }
+                ]
+              }]
+            })
+
+            const responseText = response.content[0].text
+            const jsonMatch = responseText.match(/\[[\s\S]*\]/)
+
+            if (jsonMatch) {
+              const chunkContacts = JSON.parse(jsonMatch[0])
+              const validChunkContacts = Array.isArray(chunkContacts) ? chunkContacts : []
+              allClaudeContacts = allClaudeContacts.concat(validChunkContacts)
+              this.logger.info(`✅ Chunk ${i + 1}: extracted ${validChunkContacts.length} contacts`)
+            } else {
+              this.logger.warn(`⚠️ Chunk ${i + 1}: No JSON found in response`)
+            }
+
+            // Delay between chunks to avoid rate limits
+            if (i < claudeChunks.length - 1) {
+              this.logger.info(`⏸️ Waiting 2s before next Claude chunk...`)
+              await new Promise(resolve => setTimeout(resolve, 2000))
+            }
+
+          } catch (chunkError) {
+            this.logger.error(`❌ Claude chunk ${i + 1} failed: ${chunkError.message}`)
+            // Continue with other chunks
+          }
+        }
+
+        this.logger.info(`✅ Processed all ${claudeChunks.length} Claude chunks: ${allClaudeContacts.length} total contacts`)
+
+      } else {
+        // PDF is under 100 pages, process as single document
+        this.logger.info(`✅ PDF under 100-page limit, processing as single document`)
+
+        const prompt = this.getPrompt('native') + tableSummary
+
+        const response = await this.anthropic.messages.create({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 8000,
+          messages: [{
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: {
+                  type: "base64",
+                  media_type: "application/pdf",
+                  data: pdfBuffer.toString('base64')
+                }
+              },
+              {
+                type: "text",
+                text: prompt
+              }
+            ]
+          }]
+        })
+
+        const responseText = response.content[0].text
+        const jsonMatch = responseText.match(/\[[\s\S]*\]/)
+
+        if (jsonMatch) {
+          allClaudeContacts = JSON.parse(jsonMatch[0])
+          allClaudeContacts = Array.isArray(allClaudeContacts) ? allClaudeContacts : []
+        } else {
+          this.logger.warn('⚠️ No JSON array found in Claude response')
+        }
+      }
+
+      // Return combined results
+      if (allClaudeContacts.length > 0) {
+        this.logger.info(`✅ Hybrid processing successful: extracted ${allClaudeContacts.length} contacts`)
+        this.logger.info(`📊 Processing summary:`)
+        this.logger.info(`   - PDF pages: ${totalPages}`)
+        this.logger.info(`   - Tables extracted by Textract: ${allExtractedTables.length}`)
+        this.logger.info(`   - Contacts extracted by Claude: ${allClaudeContacts.length}`)
+
+        return allClaudeContacts
+      } else {
+        this.logger.warn('⚠️ No contacts extracted')
+        return []
+      }
+
+    } catch (error) {
+      this.logger.error(`❌ Hybrid processing failed: ${error.message}`)
+      this.logger.error(error.stack)
+
+      // Fallback to native PDF processing without tables
+      this.logger.info(`🔄 Falling back to native PDF processing...`)
+      try {
+        return await this.extractContactsFromPDFNative(pdfBuffer, filename)
+      } catch (fallbackError) {
+        this.logger.error(`❌ Fallback also failed: ${fallbackError.message}`)
+        return []
+      }
+    }
+  }
+
+  /**
    * Extract contacts directly from PDF using Claude's native PDF vision capabilities
    * Automatically splits PDFs over 100 pages
    * @param {Buffer} pdfBuffer - PDF file as buffer
@@ -519,68 +1066,8 @@ class ClaudeContactExtractor {
     const maxRetries = 3
     const baseDelay = 2000 // 2 seconds
 
-    const prompt = `Extract contact information from this oil & gas PDF document. Return JSON array only.
-
-EXTRACT:
-- Names (individuals, companies, trusts)
-- Complete addresses
-- Phone/email if present
-- Ownership info (percentages, interest types)
-- Mineral rights ownership percentage (as decimal, e.g., 25.5 for 25.5%)
-
-PRIORITY SOURCES (extract ALL):
-- Postal delivery tables/certified mail lists
-- Transaction report, Transaction Report Details
-- Interest owner tables (WI, ORRI, MI, UMI owners)
-- Revenue/mailing lists
-
-EXCLUDE (skip entirely):
-- Attorneys, lawyers, law firms
-- Legal professionals (Esq., J.D., P.C., P.A., PLLC, LLP)
-- Legal services/representatives
-EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, not lawyers)
-
-POSTAL TABLES:
-- Ignore tracking numbers
-- Extract recipient names + addresses
-- Extract names + addresses
-- Combine address components
-- Trusts go in "company" field with full dtd notation
-
-JSON FORMAT:
-{
-  "company": "Business name or null",
-  "name": "Full name or null",
-  "first_name": "First name if separable",
-  "last_name": "Last name if separable",
-  "address": "Complete address",
-  "phone": "Phone with type",
-  "email": "Email if present",
-  "ownership_info": "Percentages/fractions (keep for reference)",
-  "mineral_rights_percentage": "Ownership % as decimal (0-100), null if not specified",
-  "ownership_type": "WI, ORRI, or UMI only (null if other or unspecified)",
-  "notes": "Additional details",
-  "record_type": "individual/company/joint",
-  "document_section": "Source table/section"
-}
-
-OWNERSHIP TYPE MAPPING:
-- WI = Working Interest
-- ORRI = Overriding Royalty Interest
-- UMI = Unleased Mineral Interest
-- Only use these three codes, set to null for any other type
-
-PERCENTAGE EXTRACTION:
-- Convert fractions to decimals (e.g., 1/4 = 25.0, 3/8 = 37.5)
-- Extract percentages as numbers (e.g., "25.5%" becomes 25.5)
-- If multiple percentages exist, use the primary/largest one
-- Set to null if no percentage information found
-
-Requirements:
-- Must have name/company AND address
-- Remove duplicates
-- When uncertain if legal professional, exclude UNLESS from postal/interest table
-- No text outside JSON array`;
+    // Get dynamic prompt based on document type
+    const prompt = this.getPrompt('native')
 
     try {
       this.logger.info(`🚀 Calling Claude API with native PDF processing (attempt ${retryCount + 1}) for ${filename}...`)
@@ -711,93 +1198,9 @@ Requirements:
     const maxRetries = 3
     const baseDelay = 2000 // 2 seconds
 
-    const prompt = `You are extracting contact information from an oil & gas legal document PDF. Return ONLY a JSON array.
-
-STEP 1: SCAN FOR TABLES
-Look for ANY tabular data containing names and addresses, including:
-- Tables with headers like "Name", "Name 1", "Name 2", "Address", "Address1", "Address2", "City", "State", "Zip"
-- "Transaction Report Details", "CertifiedPro.net", "Certified Mail" tables
-- "USPS Article Number" or tracking number tables
-- Interest owner tables (Working Interest, ORRI, Royalty owners)
-- Tract ownership breakdowns
-- Mailing lists or recipient lists
-- ANY multi-row data with repeated address patterns
-
-STEP 2: EXTRACT FROM EVERY ROW
-For each row in these tables:
-- Extract ALL name fields (combine if multiple name columns)
-- Extract ALL address components and combine them
-- Include phone/email if present
-- Capture ownership percentages if shown
-- Note what type of table/section it came from
-
-TABLE FORMAT VARIATIONS:
-1. **Multi-column name format:**
-   - "Name 1" + "Name 2" → combine as company or name
-   - Example: "Bureau of Land Management" + "Department of the Interior, USA"
-   
-2. **Multi-column address format:**
-   - Combine: Address1, Address2, City, State, Zip
-   - Example: "301 Dinosaur Trail" + "" + "Santa Fe" + "NM" + "87508"
-
-3. **Single column format:**
-   - Standard name/address in single cells
-
-SOURCES TO EXTRACT (extract ALL rows from ALL of these):
-✓ Transaction Report Details / CertifiedPro.net tables
-✓ Certified mail/postal delivery tables  
-✓ Interest owner tables (WI owners, ORRI owners, Royalty owners)
-✓ Tract ownership breakdowns
-✓ Unit-level ownership summaries
-✓ Revenue distribution lists
-✓ Mailing lists
-✓ Any table showing recipients or owners with addresses
-
-EXCLUDE:
-✗ Law firms, attorneys (unless they're in a trust/owner table)
-✗ Legal professionals (Esq., J.D., P.C., P.A., PLLC, LLP as standalone entries)
-✓ EXCEPTION: Include trusts and trustees from owner/recipient tables
-
-JSON FORMAT (one object per unique person/company):
-{
-  "company": "Business/entity name or null",
-  "name": "Individual full name or null", 
-  "first_name": "First name if individual",
-  "last_name": "Last name if individual",
-  "address": "Complete combined address",
-  "phone": "Phone if present",
-  "email": "Email if present",
-  "ownership_info": "Any ownership text/fractions",
-  "mineral_rights_percentage": "Numeric % (0-100) or null",
-  "ownership_type": "WI, ORRI, or UMI only (null otherwise)",
-  "tract_info": "Tract number(s) if applicable",
-  "unit_level": true/false,
-  "notes": "Additional context",
-  "record_type": "individual/company/joint",
-  "document_section": "Source (e.g., 'Transaction Report', 'Tract 1 Ownership', 'ORRI Table')"
-}
-
-OWNERSHIP TYPE CODES:
-- WI = Working Interest
-- ORRI = Overriding Royalty Interest  
-- UMI = Unleased Mineral Interest
-- null for any other type
-
-PERCENTAGE HANDLING:
-- Convert fractions: 1/4 → 25.0, 3/8 → 37.5
-- Extract from "25.5%" → 25.5
-- null if not specified
-
-CRITICAL RULES:
-1. Extract EVERY row from recipient/owner tables
-2. Ignore mailing status (Delivered, Mailed, etc.) - extract the contact anyway
-3. Combine duplicate owners across tracts into one record with all tract numbers listed
-4. Must have: (name OR company) AND (address OR ownership_info)
-5. No explanatory text - ONLY the JSON array
-
-Begin extraction now.
-${textContent}
-        `.trim();
+    // Get dynamic prompt based on document type and substitute TEXT_CONTENT variable
+    let prompt = this.getPrompt('text')
+    prompt = prompt.replace(/\$\{TEXT_CONTENT\}/g, textContent)
 
     try {
       this.logger.info(`🚀 Calling Claude API (attempt ${retryCount + 1}) with ${textContent.length.toLocaleString()} characters...`)

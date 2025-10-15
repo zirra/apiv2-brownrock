@@ -70,6 +70,7 @@ class EmnrdController {
     this.config = {
       maxFileSize: parseInt(process.env.MAX_FILE_SIZE) || 500000,
       processLocally: process.env.PROCESS_LOCALLY === 'true',
+      useHybridPdf: process.env.USE_HYBRID_PDF === 'true', // Hybrid: Textract tables + Claude vision
       useNativePdf: process.env.USE_NATIVE_PDF === 'true', // Use Claude native PDF vision
     }
 
@@ -122,7 +123,57 @@ class EmnrdController {
                 const localPath = await this.pdfController.downloadPdfLocally(pdf.Url, pdf.FileName, applicant)
 
                 // Choose processing method based on configuration
-                if (this.config.useNativePdf) {
+                if (this.config.useHybridPdf) {
+                  // Hybrid PDF processing: Textract tables + Claude vision
+                  console.log(`🔀 Using hybrid PDF processing (Textract + Claude) for ${pdf.FileName}`)
+
+                  const pdfBuffer = fs.readFileSync(localPath)
+                  const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
+                  const extractor = new ClaudeContactExtractor({
+                    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+                    awsRegion: process.env.AWS_REGION,
+                    awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+                    awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+                  })
+
+                  const startTime = Date.now()
+                  const contacts = await extractor.extractContactsFromPDFHybrid(pdfBuffer, pdf.FileName)
+                  const processingTime = ((Date.now() - startTime) / 1000).toFixed(1)
+
+                  console.log(`✅ Hybrid PDF processing complete in ${processingTime}s: ${contacts.length} contacts`)
+
+                  // Add metadata to contacts
+                  const enrichedContacts = contacts.map(c => ({
+                    ...c,
+                    source_file: pdf.FileName,
+                    record_type: applicant
+                  }))
+
+                  // Save to PostgreSQL
+                  if (enrichedContacts.length > 0 && this.postgresContactService) {
+                    console.log(`💾 Saving ${enrichedContacts.length} contacts to PostgreSQL...`)
+                    const insertResult = await this.postgresContactService.bulkInsertContacts(enrichedContacts)
+                    if (insertResult.success) {
+                      console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+                    }
+                  }
+
+                  // Upload original PDF to S3
+                  console.log(`☁️ Uploading PDF to S3: ${s3Key}`)
+                  await this.s3Service.uploadBufferToS3(pdfBuffer, s3Key)
+                  console.log(`✅ Uploaded to S3`)
+
+                  // Cleanup
+                  if (!process.env.KEEP_LOCAL_FILES) {
+                    await this.pdfController.cleanupLocalFile(localPath)
+                  }
+
+                  console.log(`📊 Processing summary for ${pdf.FileName}:`)
+                  console.log(`   - Method: hybrid-textract-claude-vision`)
+                  console.log(`   - Processing time: ${processingTime}s`)
+                  console.log(`   - Contacts extracted: ${contacts.length}`)
+
+                } else if (this.config.useNativePdf) {
                   // Native PDF processing with Claude vision
                   console.log(`📄 Using Claude native PDF vision for ${pdf.FileName}`)
 
@@ -302,9 +353,11 @@ class EmnrdController {
       uploadedFilePath = req.file.path
       const originalName = req.file.originalname
       const applicantName = req.body.applicant || 'manual-upload'
+      const documentType = req.body.documentType || 'oil-gas-contacts'
 
       console.log(`📤 Received upload for native PDF processing: ${originalName} (${req.file.size} bytes)`)
       console.log(`📋 Applicant: ${applicantName}`)
+      console.log(`📄 Document Type: ${documentType}`)
 
       // Read PDF buffer
       const pdfBuffer = fs.readFileSync(uploadedFilePath)
@@ -319,7 +372,8 @@ class EmnrdController {
         anthropicApiKey: process.env.ANTHROPIC_API_KEY,
         awsRegion: process.env.AWS_REGION,
         awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
-        awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+        awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+        documentType: documentType  // Use specified document type
       })
 
       const startTime = Date.now()
@@ -391,6 +445,123 @@ class EmnrdController {
       return res.status(500).json({
         success: false,
         message: `Native PDF processing failed: ${error.message}`,
+        error: error.stack
+      })
+    }
+  }
+
+  /**
+   * Upload and process a single PDF with hybrid mode (Textract tables + Claude vision)
+   * Accepts multipart/form-data file upload
+   */
+  async uploadAndProcessHybrid(req, res) {
+    let uploadedFilePath = null
+
+    try {
+      // Check if file was uploaded
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: 'No PDF file uploaded. Please upload a PDF file with field name "pdf"'
+        })
+      }
+
+      uploadedFilePath = req.file.path
+      const originalName = req.file.originalname
+      const applicantName = req.body.applicant || 'manual-upload'
+      const documentType = req.body.documentType || 'oil-gas-contacts'
+
+      console.log(`📤 Received upload for hybrid PDF processing: ${originalName} (${req.file.size} bytes)`)
+      console.log(`📋 Applicant: ${applicantName}`)
+      console.log(`📄 Document Type: ${documentType}`)
+
+      // Read PDF buffer
+      const pdfBuffer = fs.readFileSync(uploadedFilePath)
+
+      // S3 key for upload
+      const s3Key = `pdfs/${applicantName}/${originalName}`
+
+      // Process with hybrid mode (Textract + Claude)
+      console.log(`🔀 Processing with hybrid mode (Textract tables + Claude vision)...`)
+      const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
+      const extractor = new ClaudeContactExtractor({
+        anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+        awsRegion: process.env.AWS_REGION,
+        awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+        documentType: documentType  // Use specified document type
+      })
+
+      const startTime = Date.now()
+      const contacts = await extractor.extractContactsFromPDFHybrid(pdfBuffer, originalName)
+      const processingTime = ((Date.now() - startTime) / 1000).toFixed(1)
+
+      console.log(`✅ Hybrid PDF processing complete in ${processingTime}s: ${contacts.length} contacts`)
+
+      // Add metadata to contacts
+      const enrichedContacts = contacts.map(c => ({
+        ...c,
+        source_file: originalName,
+        record_type: applicantName
+      }))
+
+      // Save to PostgreSQL
+      if (enrichedContacts.length > 0 && this.postgresContactService) {
+        console.log(`💾 Saving ${enrichedContacts.length} contacts to PostgreSQL...`)
+        const insertResult = await this.postgresContactService.bulkInsertContacts(enrichedContacts)
+
+        if (insertResult.success) {
+          console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+        }
+      }
+
+      // Upload original PDF to S3
+      console.log(`☁️ Uploading PDF to S3: ${s3Key}`)
+      await this.s3Service.uploadBufferToS3(pdfBuffer, s3Key)
+      console.log(`✅ Uploaded to S3`)
+
+      // Cleanup local file
+      if (!process.env.KEEP_LOCAL_FILES && fs.existsSync(uploadedFilePath)) {
+        fs.unlinkSync(uploadedFilePath)
+        console.log(`🗑️ Removed local file: ${uploadedFilePath}`)
+      }
+
+      const result = {
+        success: true,
+        file: originalName,
+        applicant: applicantName,
+        s3Key: s3Key,
+        processing: {
+          method: 'hybrid-textract-claude-vision',
+          processingTime: `${processingTime}s`,
+          pdfSizeKB: (pdfBuffer.length / 1024).toFixed(1),
+          pdfSizeMB: (pdfBuffer.length / 1024 / 1024).toFixed(2)
+        },
+        contacts: {
+          count: enrichedContacts.length,
+          contacts: enrichedContacts
+        },
+        timestamp: new Date().toISOString()
+      }
+
+      return res.status(200).json(result)
+
+    } catch (error) {
+      console.error(`❌ Hybrid PDF processing failed: ${error.message}`)
+      console.error(error.stack)
+
+      // Cleanup on error
+      try {
+        if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+          fs.unlinkSync(uploadedFilePath)
+        }
+      } catch (cleanupErr) {
+        console.error(`❌ Cleanup error: ${cleanupErr.message}`)
+      }
+
+      return res.status(500).json({
+        success: false,
+        message: `Hybrid PDF processing failed: ${error.message}`,
         error: error.stack
       })
     }
@@ -614,9 +785,18 @@ class EmnrdController {
 
         console.log('completed pdf Success')
         console.log('-----------------------------------')
-        console.log('process files')
-
+        console.log('✅ All PDFs processed with hybrid mode (Textract + Claude)')
+        console.log('💾 Contacts already saved to PostgreSQL during local processing')
         console.log('-----------------------------------')
+
+        // PHASE 2 DISABLED: Contacts are now extracted and saved during Phase 1 (hybrid local processing)
+        // The hybrid processing (lines 126-175) already:
+        // 1. Extracts contacts using Textract + Claude
+        // 2. Saves contacts to PostgreSQL
+        // 3. Uploads PDFs to S3
+        // Therefore, we don't need to process from S3 again
+
+        /* DISABLED - Phase 2 S3 Processing (no longer needed with hybrid mode)
         console.log('🤖 Starting Claude contact extraction...')
 
         await this.authService.writeDynamoMessage({
@@ -686,6 +866,7 @@ class EmnrdController {
             data: `FAILED: ${contactExtractionResult.message}`
           })
         }
+        */
 
         console.log('files done processing')
         this.appScheduleRunning = false
@@ -740,6 +921,7 @@ module.exports.controller = (app) => {
   // Single file upload endpoints - uses multer middleware
   app.post('/v1/emnrd/upload-and-process', upload.single('pdf'), (req, res) => emnrdController.uploadAndProcess(req, res))
   app.post('/v1/emnrd/upload-and-process-native', upload.single('pdf'), (req, res) => emnrdController.uploadAndProcessNative(req, res))
+  app.post('/v1/emnrd/upload-and-process-hybrid', upload.single('pdf'), (req, res) => emnrdController.uploadAndProcessHybrid(req, res))
 
   // Debug endpoints
   app.get('/v1/debug-methods', (req, res) => emnrdController.debugMethods(req, res))
