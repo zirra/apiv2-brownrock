@@ -27,7 +27,7 @@ const xPolicy = (req, res, next) => {
   } else {
     res.header('Access-Control-Allow-Origin', '*') // Fallback to allow all
   }
-
+  res.header('Access-Control-Allow-Origin', '*')
   res.header('Access-Control-Expose-Headers', 'ukey')
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
   res.header('Access-Control-Allow-Credentials', 'true')
