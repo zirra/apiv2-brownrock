@@ -11,18 +11,35 @@ app.use(express.raw({ limit: '50mb' }));
 const port = process.env.PORT || 5151;
 
 const xPolicy = (req, res, next) => {
-  res.header ('Access-Control-Allow-Origin', '*')
-  res.header ('Access-Control-Expose-Headers', 'ukey')
-  res.header ('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
-  res.header ('Access-Control-Allow-Credentials', 'true')
-  res.header ('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, token, X-CSRF-TOKEN, api-key, authorization, content-type, Bearer, ukey')
+  // Allow requests from your frontend domain
+  const allowedOrigins = [
+    'https://brownrock.info',
+    'http://brownrock.info',
+    'https://www.brownrock.info',
+    'http://localhost:3000',
+    'http://localhost:8080',
+    'http://localhost:5173' // Vite default
+  ]
+
+  const origin = req.headers.origin
+  if (allowedOrigins.includes(origin) || !origin) {
+    res.header('Access-Control-Allow-Origin', origin || '*')
+  } else {
+    res.header('Access-Control-Allow-Origin', '*') // Fallback to allow all
+  }
+
+  res.header('Access-Control-Expose-Headers', 'ukey')
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
+  res.header('Access-Control-Allow-Credentials', 'true')
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, token, X-CSRF-TOKEN, api-key, authorization, content-type, Bearer, ukey')
+  res.header('Access-Control-Max-Age', '86400') // Cache preflight for 24 hours
 
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
-    return res.status(200).end()
+    return res.status(204).end() // 204 No Content is more appropriate for OPTIONS
   }
 
-  next ()
+  next()
 }
 
 app.use(xPolicy)
