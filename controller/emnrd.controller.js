@@ -1082,7 +1082,11 @@ class EmnrdController {
   // Cron job initialization
   initializeCronJob() {
     // Original job - Tuesday 11:59 PM
-    cron.schedule('59 23 * * 2', async () => {
+    const emnrdCronEnabled = process.env.EMNRD_CRON_ENABLED !== 'false' // Enabled by default
+
+    if (emnrdCronEnabled) {
+      console.log('📅 Initializing EMNRD cron job: Tuesdays at 11:59 PM')
+      cron.schedule('59 23 * * 2', async () => {
       this.filesToProcess = []
       try {
         console.log(`[${new Date().toISOString()}] Good morning! Running daily job at 11:05 AM`)
@@ -1213,6 +1217,9 @@ class EmnrdController {
         this.appScheduleRunning = false
       }
     })
+    } else {
+      console.log('⏸️ EMNRD cron job is disabled (set EMNRD_CRON_ENABLED=false to disable)')
+    }
 
     // S3 PDF Analysis Job - Separate schedule
     if (this.s3AnalysisController.getConfig().enabled) {
