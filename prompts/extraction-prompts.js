@@ -15,7 +15,7 @@ module.exports = {
    * For extracting contact information from oil & gas documents
    */
   'oil-gas-contacts': {
-    native: `Extract contact information from this oil & gas PDF document. Return JSON array only.
+    native: `Extract contact information from this oil & gas document. Return JSON array only.
 
 EXTRACT:
 - Names (individuals, companies, trusts)
@@ -25,70 +25,14 @@ EXTRACT:
 - Mineral rights ownership percentage (as decimal, e.g., 25.5 for 25.5%)
 
 PRIORITY SOURCES (extract ALL):
-- Postal delivery tables/certified mail lists
-- Transaction report, Transaction Report Details
-- Interest owner tables (WI, ORRI, MI, UMI owners)
-- Revenue/mailing lists
-
-EXCLUDE (skip entirely):
-- Attorneys, lawyers, law firms
-- Legal professionals (Esq., J.D., P.C., P.A., PLLC, LLP)
-- Legal services/representatives
-EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, not lawyers)
-
-POSTAL TABLES:
-- Ignore tracking numbers
-- Extract recipient names + addresses
-- Extract names + addresses
-- Combine address components
-- Trusts go in "company" field with full dtd notation
-
-JSON FORMAT:
-{
-  "company": "Business name or null",
-  "name": "Full name or null",
-  "first_name": "First name if separable",
-  "last_name": "Last name if separable",
-  "address": "Complete address",
-  "phone": "Phone with type",
-  "email": "Email if present",
-  "ownership_info": "Percentages/fractions (keep for reference)",
-  "mineral_rights_percentage": "Ownership % as decimal (0-100), null if not specified",
-  "ownership_type": "WI, ORRI, or UMI only (null if other or unspecified)",
-  "notes": "Additional details",
-  "record_type": "individual/company/joint",
-  "document_section": "Source table/section"
-}
-
-OWNERSHIP TYPE MAPPING:
-- WI = Working Interest
-- ORRI = Overriding Royalty Interest
-- UMI = Unleased Mineral Interest
-- Only use these three codes, set to null for any other type
-
-PERCENTAGE EXTRACTION:
-- Convert fractions to decimals (e.g., 1/4 = 25.0, 3/8 = 37.5)
-- Extract percentages as numbers (e.g., "25.5%" becomes 25.5)
-- If multiple percentages exist, use the primary/largest one
-- Set to null if no percentage information found
-
-Requirements:
-- Must have name/company AND address
-- Remove duplicates
-- When uncertain if legal professional, exclude UNLESS from postal/interest table
-- No text outside JSON array`,
-
-    text: `Extract contact information from this oil & gas document. Return JSON array only.
-
-EXTRACT:
-- Names (individuals, companies, trusts)
-- Complete addresses
-- Phone/email if present
-- Ownership info (percentages, interest types)
-- Mineral rights ownership percentage (as decimal, e.g., 25.5 for 25.5%)
-
-PRIORITY SOURCES (extract ALL):
-- Postal delivery tables/certified mail lists
+- **POSTAL DELIVERY REPORTS/TABLES** (MOST CRITICAL - contains certified mail recipients)
+  * Tables titled "Postal Delivery Report" or similar
+  * Identified by USPS tracking numbers (starting with 9414...) in first column
+  * Column structure: Tracking# | Name | Address | City | State | Zip | Delivery Status
+  * Extract ALL entries - these are verified recipients of notice
+  * Ignore tracking numbers themselves, but use them to identify postal tables
+  * Combine address fields into complete address
+  * Include delivery status/date in notes field
 - Transaction report, Transaction Report Details, CertifiedPro.net reports
 - **Tables with columns like "Name 1", "Name 2", "Address1", "Address2" - these are recipient lists**
 - Interest owner tables (WI, ORRI, MI, UMI owners)
@@ -96,11 +40,25 @@ PRIORITY SOURCES (extract ALL):
 - **Tract ownership breakdowns (pages with "Summary of Interests" by tract)**
 - **Unit-level ownership summaries (consolidated ownership across all tracts)**
 
+POSTAL DELIVERY TABLES (CRITICAL IDENTIFICATION):
+- **KEY IDENTIFIER**: Look for tables with USPS tracking numbers (format: 9414811898765448760XXX) in the first column
+- These tracking numbers indicate a POSTAL DELIVERY REPORT table
+- **IGNORE the tracking numbers in extraction** - they are only for table identification
+- Extract from columns: Name | Address | City | State | Zip | Delivery Status
+- Combine address components: "Address, City, State Zip"
+- Put delivery confirmation in notes field (e.g., "Delivered June 13, 2025", "Picked up June 10, 2025")
+- Extract ALL rows from these tables - they represent certified mail recipients
+- These tables may span multiple pages - continue extraction across page breaks
+
 SPECIAL FORMATS:
 - **For tables with "Name 1" and "Name 2" columns:**
   * Combine Name 1 and Name 2 as a single entity
   * If Name 2 is blank, use only Name 1
   * Example: Name 1="Bureau of Land Management", Name 2="Department of the Interior, USA" → company="Bureau of Land Management, Department of the Interior, USA"
+- **For Postal Delivery tables:**
+  * Single Name column contains individual or company name
+  * Address/City/State/Zip in separate columns - combine all
+  * Status column shows delivery confirmation - include in notes
 - Combine Address1 and Address2 fields into complete address
 - Extract all rows regardless of "Mailing Status" column
 
@@ -119,12 +77,6 @@ EXCLUDE (skip entirely):
 - Legal services/representatives
 EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, not lawyers)
 
-POSTAL TABLES:
-- Ignore tracking numbers, USPS Article Numbers, mailing dates, reference numbers
-- Extract recipient names from ANY name field (Name, Name 1, Name 2, Recipient Name)
-- Combine all address components (Address1, Address2, Street Address, City, State, Zip)
-- Trusts go in "company" field with full dtd notation
-
 JSON FORMAT:
 {
   "company": "Business name or null",
@@ -139,9 +91,9 @@ JSON FORMAT:
   "ownership_type": "WI, ORRI, or UMI only (null if other or unspecified)",
   "tract_info": "Tract number(s) if tract-level data",
   "unit_level": true/false,
-  "notes": "Additional details",
+  "notes": "Additional details, delivery status, or address_unknown: true if no address",
   "record_type": "individual/company/joint",
-  "document_section": "Source table/section (e.g., 'Tract 1', 'Unit Summary', 'Postal Table', 'Transaction Report')"
+  "document_section": "Source table/section (e.g., 'Tract 1', 'Unit Summary', 'Postal Delivery Report', 'Transaction Report')"
 }
 
 OWNERSHIP TYPE MAPPING:
@@ -164,12 +116,130 @@ OWNERSHIP PRIORITY:
 Requirements:
 - Must have name/company AND (address OR be listed in Chronology of Contacts or recapitulation table)
 - If no address available, include party if they appear in:
+  * **Postal Delivery Report tables (even if delivery failed)**
   * Chronology of Contacts section (even with N/A address)
   * Recapitulation/ownership tables with interest type
   * Mark as "address_unknown": true in notes field
 - Remove duplicates
 - When uncertain if legal professional, exclude UNLESS from postal/interest table
 - For parties marked "Stranger in title" or "Notify" status, include them with whatever information is available
+- No text outside JSON array
+
+POSTAL DELIVERY TABLE EXAMPLES:
+
+Example 1 - Standard Entry:
+9414811898765448760725 | AmericaWest Resources, LLC Total | PO Box 3383 | Midland | TX | 79702-3383 | Delivered June 13, 2025
+
+EXTRACT AS:
+{
+  "company": "AmericaWest Resources, LLC Total",
+  "name": null,
+  "first_name": null,
+  "last_name": null,
+  "address": "PO Box 3383, Midland, TX 79702-3383",
+  "phone": null,
+  "email": null,
+  "ownership_info": null,
+  "mineral_rights_percentage": null,
+  "ownership_type": null,
+  "tract_info": null,
+  "unit_level": false,
+  "notes": "Delivered June 13, 2025",
+  "record_type": "company",
+  "document_section": "Postal Delivery Report"
+}
+
+Example 2 - Individual Entry:
+9414811898765448760749 | Baker C. Donnelly | PO Box 4777 | Austin | TX | 78765-4777 | Reminder to pick up
+
+EXTRACT AS:
+{
+  "company": null,
+  "name": "Baker C. Donnelly",
+  "first_name": "Baker",
+  "last_name": "Donnelly",
+  "address": "PO Box 4777, Austin, TX 78765-4777",
+  "phone": null,
+  "email": null,
+  "ownership_info": null,
+  "mineral_rights_percentage": null,
+  "ownership_type": null,
+  "tract_info": null,
+  "unit_level": false,
+  "notes": "Reminder to pick up at Austin post office",
+  "record_type": "individual",
+  "document_section": "Postal Delivery Report"
+}
+
+Example 3 - Trust Entry:
+9414811898765448760497 | Richard Donnelly, Trustee Under The George A. Donnelly TR FBO David Preston, Richard Jr. and Martha Brittain Donnelly | PO Box 3506 | Midland | TX | 79702-3506 | Picked up June 13, 2025
+
+EXTRACT AS:
+{
+  "company": "Richard Donnelly, Trustee Under The George A. Donnelly TR FBO David Preston, Richard Jr. and Martha Brittain Donnelly",
+  "name": null,
+  "first_name": null,
+  "last_name": null,
+  "address": "PO Box 3506, Midland, TX 79702-3506",
+  "phone": null,
+  "email": null,
+  "ownership_info": null,
+  "mineral_rights_percentage": null,
+  "ownership_type": null,
+  "tract_info": null,
+  "unit_level": false,
+  "notes": "Picked up June 13, 2025",
+  "record_type": "company",
+  "document_section": "Postal Delivery Report"
+}
+
+Text content:
+\${TEXT_CONTENT}`,
+
+    text: `Extract contact information from the following extracted text content. Return ONLY a JSON array, no other text.
+
+EXTRACT:
+- Names (individuals, companies, trusts)
+- Complete addresses
+- Phone/email if present
+- Ownership info (percentages, interest types)
+- Mineral rights ownership percentage (as decimal, e.g., 25.5 for 25.5%)
+
+PRIORITY SOURCES (extract ALL):
+- Postal Delivery Reports/Tables (MOST CRITICAL - contains certified mail recipients)
+- Transaction reports, CertifiedPro.net reports
+- Interest owner tables (WI, ORRI, MI, UMI owners)
+- Revenue/mailing lists
+- Tract ownership breakdowns
+- Unit-level ownership summaries
+
+EXCLUDE (skip entirely):
+- Attorneys, lawyers, law firms, legal professionals
+- EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, not lawyers)
+
+JSON FORMAT (return array of objects):
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Complete address",
+  "phone": "Phone with type",
+  "email": "Email if present",
+  "ownership_info": "Percentages/fractions",
+  "mineral_rights_percentage": "Ownership % as decimal (0-100), null if not specified",
+  "ownership_type": "WI, ORRI, or UMI only (null if other)",
+  "tract_info": "Tract number(s) if tract-level data",
+  "unit_level": true/false,
+  "notes": "Additional details or address_unknown: true if no address",
+  "record_type": "individual/company/joint",
+  "document_section": "Source table/section"
+}
+
+Requirements:
+- Return ONLY the JSON array, no explanatory text
+- Must have name/company AND address (or mark address_unknown: true)
+- Remove duplicates
 - No text outside JSON array
 
 Text content:

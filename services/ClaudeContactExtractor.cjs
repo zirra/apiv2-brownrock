@@ -711,7 +711,9 @@ class ClaudeContactExtractor {
     this.logger.info(`📄 PDF size: ${(pdfBuffer.length / 1024 / 1024).toFixed(2)} MB`)
 
     const sizeThreshold = parseInt(process.env.HYBRID_SIZE_THRESHOLD) || 8388608 // 8MB default
-    const chunkSize = parseInt(process.env.HYBRID_CHUNK_SIZE) || 50 // 50 pages default
+    // Textract's AnalyzeDocument API only supports single-page PDFs
+    // Use TEXTRACT_PAGE_CHUNK_SIZE=1 for synchronous API compliance
+    const chunkSize = parseInt(process.env.TEXTRACT_PAGE_CHUNK_SIZE) || 1 // 1 page default (Textract sync API requirement)
     const tempPrefix = process.env.HYBRID_TEMP_PREFIX || 'temp/'
 
     let allExtractedTables = []
@@ -724,7 +726,7 @@ class ClaudeContactExtractor {
 
         // Split PDF into chunks
         const chunks = await this.splitPDF(pdfBuffer, chunkSize)
-        this.logger.info(`📑 Split PDF into ${chunks.length} chunks of ${chunkSize} pages each`)
+        this.logger.info(`📑 Split PDF into ${chunks.length} chunks of ${chunkSize} page(s) each (Textract requires single-page PDFs)`)
 
         // Process each chunk with Textract
         for (let i = 0; i < chunks.length; i++) {
@@ -783,7 +785,15 @@ class ClaudeContactExtractor {
 
               } catch (textractError) {
                 textractAttempt++
-                this.logger.warn(`⚠️ Textract attempt ${textractAttempt} failed for chunk ${i + 1}: ${textractError.message}`)
+
+                // Provide detailed error message for unsupported format errors
+                if (textractError.message && textractError.message.includes('unsupported document format')) {
+                  this.logger.error(`❌ Textract attempt ${textractAttempt} failed for chunk ${i + 1}: ${textractError.message}`)
+                  this.logger.error(`💡 Hint: Textract's AnalyzeDocument API only supports single-page PDFs. Current chunk size: ${chunkSize} page(s)`)
+                  this.logger.error(`💡 Set TEXTRACT_PAGE_CHUNK_SIZE=1 in environment variables if not already set`)
+                } else {
+                  this.logger.warn(`⚠️ Textract attempt ${textractAttempt} failed for chunk ${i + 1}: ${textractError.message}`)
+                }
 
                 if (textractAttempt < 3) {
                   const delay = Math.pow(2, textractAttempt) * 1000 // Exponential backoff
@@ -1194,6 +1204,219 @@ class ClaudeContactExtractor {
     }
   }
 
+  /**
+   * Extract contacts from multiple PNG images generated from a PDF
+   * @param {Array} imageData - Array of {path, base64, size} objects
+   * @param {string} filename - Original filename
+   * @param {number} retryCount - Current retry attempt
+   * @returns {Array} - Array of contact objects
+   */
+  async extractContactsFromImages(imageData, filename = 'document.pdf', retryCount = 0) {
+    // Get dynamic prompt based on document type
+    const prompt = this.getPrompt('native')
+
+    try {
+      this.logger.info(`🚀 Processing ${imageData.length} images for ${filename}...`)
+
+      // Calculate total size
+      const totalSize = imageData.reduce((sum, img) => sum + img.size, 0)
+      this.logger.info(`📸 Total image data: ${(totalSize / 1024 / 1024).toFixed(2)} MB across ${imageData.length} images`)
+
+      // Claude API has a ~10MB request limit for base64 images
+      // Strategy: Process images in batches if total size is too large
+      const MAX_BATCH_SIZE_MB = 8 // Conservative limit to avoid 413 errors
+      const maxBatchSizeBytes = MAX_BATCH_SIZE_MB * 1024 * 1024
+
+      // Check if we need to batch
+      if (totalSize > maxBatchSizeBytes) {
+        this.logger.warn(`⚠️ Total size (${(totalSize/1024/1024).toFixed(2)}MB) exceeds ${MAX_BATCH_SIZE_MB}MB limit, processing in batches...`)
+
+        // Split into batches based on size
+        const batches = []
+        let currentBatch = []
+        let currentBatchSize = 0
+
+        for (const image of imageData) {
+          if (currentBatchSize + image.size > maxBatchSizeBytes && currentBatch.length > 0) {
+            // Start new batch
+            batches.push(currentBatch)
+            currentBatch = [image]
+            currentBatchSize = image.size
+          } else {
+            currentBatch.push(image)
+            currentBatchSize += image.size
+          }
+        }
+
+        // Add final batch
+        if (currentBatch.length > 0) {
+          batches.push(currentBatch)
+        }
+
+        this.logger.info(`📦 Split into ${batches.length} batches`)
+
+        // Process each batch
+        let allContacts = []
+        for (let i = 0; i < batches.length; i++) {
+          const batch = batches[i]
+          const batchSize = batch.reduce((sum, img) => sum + img.size, 0)
+          this.logger.info(`🔄 Processing batch ${i + 1}/${batches.length} (${batch.length} images, ${(batchSize/1024/1024).toFixed(2)}MB)...`)
+
+          const batchContacts = await this.processSingleImageBatch(batch, prompt, filename, retryCount)
+          allContacts = allContacts.concat(batchContacts)
+
+          // Delay between batches to avoid rate limits
+          if (i < batches.length - 1) {
+            this.logger.info(`⏸️ Waiting 2 seconds before next batch...`)
+            await new Promise(resolve => setTimeout(resolve, 2000))
+          }
+        }
+
+        this.logger.info(`✅ Processed all ${batches.length} batches: ${allContacts.length} total contacts`)
+        return allContacts
+
+      } else {
+        // Process all images in single request
+        return await this.processSingleImageBatch(imageData, prompt, filename, retryCount)
+      }
+
+    } catch (error) {
+      this.logger.error('Error processing images with Claude vision:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Process a single batch of images
+   * @private
+   */
+  async processSingleImageBatch(imageData, prompt, filename, retryCount = 0) {
+    const maxRetries = 3
+    const baseDelay = 2000
+
+    try {
+      // Build content array with all images
+      const content = []
+
+      // Add all images first
+      for (const image of imageData) {
+        content.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/png",
+            data: image.base64
+          }
+        })
+      }
+
+      // Add prompt text at the end
+      content.push({
+        type: "text",
+        text: prompt
+      })
+
+      const response = await this.anthropic.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 8000,
+        messages: [{
+          role: "user",
+          content: content
+        }]
+      });
+
+      const responseText = response.content[0].text;
+
+      // Extract JSON from response
+      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        const contacts = JSON.parse(jsonMatch[0]);
+        const validContacts = Array.isArray(contacts) ? contacts : [];
+        this.logger.info(`✅ Claude vision analysis successful: extracted ${validContacts.length} contacts from ${imageData.length} images`);
+        return validContacts;
+      } else {
+        this.logger.warn('No JSON array found in Claude response');
+        return [];
+      }
+
+    } catch (error) {
+      this.logger.error('Error processing image batch with Claude vision:', error.message);
+
+      // Handle 413 request too large - try processing images one at a time
+      if (error.status === 413 && imageData.length > 1) {
+        this.logger.warn(`⚠️ Request too large (413), processing images individually...`)
+
+        let allContacts = []
+        for (let i = 0; i < imageData.length; i++) {
+          this.logger.info(`🔄 Processing image ${i + 1}/${imageData.length} individually...`)
+          const singleImageContacts = await this.processSingleImageBatch([imageData[i]], prompt, filename, 0)
+          allContacts = allContacts.concat(singleImageContacts)
+
+          // Small delay between individual images
+          if (i < imageData.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1000))
+          }
+        }
+
+        this.logger.info(`✅ Processed ${imageData.length} images individually: ${allContacts.length} total contacts`)
+        return allContacts
+      }
+
+      // Handle rate limit (429) and overloaded (529) errors with exponential backoff
+      if ((error.status === 429 || error.status === 529) && retryCount < maxRetries) {
+        const delay = baseDelay * Math.pow(2, retryCount)
+        this.logger.warn(`Claude ${error.status === 529 ? 'overloaded (529)' : 'rate limited (429)'}, waiting ${delay/1000}s before retry ${retryCount + 1}/${maxRetries}...`);
+
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return await this.processSingleImageBatch(imageData, prompt, filename, retryCount + 1);
+
+      } else if (error.status === 429 || error.status === 529) {
+        const longDelay = error.status === 529 ? 30000 : 60000
+        this.logger.warn(`Claude ${error.status === 529 ? 'overloaded' : 'rate limited'}, final retry in ${longDelay/1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, longDelay));
+
+        try {
+          const content = []
+          for (const image of imageData) {
+            content.push({
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: "image/png",
+                data: image.base64
+              }
+            })
+          }
+          content.push({
+            type: "text",
+            text: prompt
+          })
+
+          const retryResponse = await this.anthropic.messages.create({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 8000,
+            messages: [{
+              role: "user",
+              content: content
+            }]
+          });
+
+          const responseText = retryResponse.content[0].text;
+          const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const contacts = JSON.parse(jsonMatch[0]);
+            this.logger.info(`✅ Claude vision final retry successful: ${contacts.length} contacts`);
+            return Array.isArray(contacts) ? contacts : [];
+          }
+        } catch (retryError) {
+          this.logger.error(`Final retry also failed: ${retryError.message}`);
+        }
+      }
+
+      return [];
+    }
+  }
+
   async extractContactInfoWithClaude(textContent, retryCount = 0) {
     const maxRetries = 3
     const baseDelay = 2000 // 2 seconds
@@ -1216,15 +1439,44 @@ class ClaudeContactExtractor {
 
       const responseText = response.content[0].text;
 
-      // Extract JSON from response
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+      // Log first 500 chars of response for debugging
+      this.logger.info(`📝 Claude response preview: ${responseText.substring(0, 500)}...`);
+
+      // Extract JSON from response - try multiple patterns
+      let jsonMatch = responseText.match(/\[[\s\S]*\]/);
+
+      // If no match, try looking for JSON code blocks
+      if (!jsonMatch) {
+        const codeBlockMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
+        if (codeBlockMatch) {
+          jsonMatch = [codeBlockMatch[1]];
+          this.logger.info('📦 Found JSON in code block');
+        }
+      }
+
+      // If still no match, try without markdown
+      if (!jsonMatch) {
+        const plainCodeMatch = responseText.match(/```\s*([\s\S]*?)\s*```/);
+        if (plainCodeMatch) {
+          jsonMatch = [plainCodeMatch[1]];
+          this.logger.info('📦 Found JSON in plain code block');
+        }
+      }
+
       if (jsonMatch) {
-        const contacts = JSON.parse(jsonMatch[0]);
-        const validContacts = Array.isArray(contacts) ? contacts : [];
-        this.logger.info(`✅ Claude API successful: extracted ${validContacts.length} contacts`);
-        return validContacts;
+        try {
+          const contacts = JSON.parse(jsonMatch[0]);
+          const validContacts = Array.isArray(contacts) ? contacts : [];
+          this.logger.info(`✅ Claude API successful: extracted ${validContacts.length} contacts`);
+          return validContacts;
+        } catch (parseError) {
+          this.logger.error(`❌ JSON parse error: ${parseError.message}`);
+          this.logger.error(`📄 Attempted to parse: ${jsonMatch[0].substring(0, 200)}...`);
+          return [];
+        }
       } else {
-        this.logger.warn('No JSON array found in Claude response');
+        this.logger.warn('❌ No JSON array found in Claude response');
+        this.logger.warn(`📄 Full response (first 1000 chars): ${responseText.substring(0, 1000)}`);
         return [];
       }
 

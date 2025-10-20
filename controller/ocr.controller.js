@@ -1479,6 +1479,295 @@ class OCRController {
   }
 
   /**
+   * Upload PDF and process with Ghostscript to images + Claude vision analysis
+   * Converts PDF to PNG images using Ghostscript and sends them to Claude for analysis
+   */
+  async uploadAndProcessWithClaudeVision(req, res) {
+    const { execSync } = require('child_process')
+    let uploadedFilePath = null
+    let outputDir = null
+    let resizedPdfPath = null
+
+    try {
+      // Check if file was uploaded
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: 'No PDF file uploaded. Please upload a PDF file with field name "pdf"'
+        })
+      }
+
+      uploadedFilePath = req.file.path
+      const originalName = req.file.originalname
+
+      console.log(`📤 Received upload: ${originalName} (${req.file.size} bytes)`)
+
+      // Prepare temp directory for image output
+      const tempDir = process.env.OCR_TEMP_DIR || './temp/ocr'
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true })
+      }
+
+      outputDir = path.join(tempDir, `gs_images_${Date.now()}`)
+      if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true })
+      }
+
+      // First, optionally resize/flatten the PDF with Ghostscript for better image quality
+      resizedPdfPath = path.join(tempDir, `gs_resized_${Date.now()}.pdf`)
+
+      console.log(`🔧 Optimizing PDF with Ghostscript...`)
+      const gsOptimizeCommand = [
+        'gs',
+        '-sDEVICE=pdfwrite',
+        '-dCompatibilityLevel=1.4',
+        '-dPDFSETTINGS=/ebook',
+        '-dNOPAUSE',
+        '-dQUIET',
+        '-dBATCH',
+        `-sOutputFile=${resizedPdfPath}`,
+        uploadedFilePath
+      ].join(' ')
+
+      execSync(gsOptimizeCommand, { stdio: 'pipe' })
+      console.log(`✅ PDF optimized`)
+
+      // Convert PDF to PNG images using Ghostscript
+      const startGsTime = Date.now()
+      const resolution = process.env.GS_IMAGE_RESOLUTION || '300' // 300 DPI default
+
+      console.log(`🖼️ Converting PDF to PNG images at ${resolution} DPI...`)
+
+      const outputPattern = path.join(outputDir, 'output_%03d.png')
+      const gsCommand = [
+        'gs',
+        '-o', outputPattern,
+        '-sDEVICE=png16m',
+        `-r${resolution}`,
+        resizedPdfPath
+      ].join(' ')
+
+      execSync(gsCommand, { stdio: 'pipe' })
+      const gsTime = Date.now() - startGsTime
+
+      console.log(`✅ Ghostscript image conversion completed in ${gsTime}ms`)
+
+      // Get list of generated images
+      const imageFiles = fs.readdirSync(outputDir)
+        .filter(file => file.endsWith('.png'))
+        .sort()
+        .map(file => path.join(outputDir, file))
+
+      if (imageFiles.length === 0) {
+        throw new Error('No images generated from PDF')
+      }
+
+      console.log(`📸 Generated ${imageFiles.length} images from PDF`)
+
+      // Resize images to meet Claude's 2000px dimension limit
+      console.log(`📐 Resizing images to meet Claude's dimension requirements...`)
+      const resizedImageFiles = []
+
+      for (const imagePath of imageFiles) {
+        const resizedPath = imagePath.replace('.png', '_resized.png')
+
+        // Check if magick (v7) is available
+        let useV7 = false
+        try {
+          execSync('magick --version', { stdio: 'pipe' })
+          useV7 = true
+        } catch (e) {
+          // Fall back to convert (v6)
+        }
+
+        try {
+          // Build command with proper quoting to handle '>' character
+          // The '>' in '1800x1800>' means "only shrink larger images"
+          let resizeCommand
+
+          if (useV7) {
+            // ImageMagick v7 syntax
+            resizeCommand = `magick "${imagePath}" -resize "1800x1800>" "${resizedPath}"`
+          } else {
+            // ImageMagick v6 syntax
+            resizeCommand = `convert "${imagePath}" -resize "1800x1800>" "${resizedPath}"`
+          }
+
+          execSync(resizeCommand, { stdio: 'pipe', shell: true })
+          resizedImageFiles.push(resizedPath)
+
+          const originalSize = fs.statSync(imagePath).size
+          const resizedSize = fs.statSync(resizedPath).size
+          console.log(`  ✓ ${path.basename(imagePath)}: ${(originalSize/1024).toFixed(0)}KB → ${(resizedSize/1024).toFixed(0)}KB`)
+        } catch (resizeError) {
+          console.warn(`⚠️ Failed to resize ${path.basename(imagePath)}, using original: ${resizeError.message}`)
+          resizedImageFiles.push(imagePath)
+        }
+      }
+
+      console.log(`✅ Resized ${resizedImageFiles.length} images`)
+
+      // Send images to Claude for analysis
+      console.log(`🤖 Sending images to Claude for analysis...`)
+      const startClaudeTime = Date.now()
+
+      const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
+      const extractor = new ClaudeContactExtractor({
+        anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+        awsRegion: process.env.AWS_REGION,
+        awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+      })
+
+      // Convert resized images to base64 for Claude
+      const imageData = resizedImageFiles.map(imagePath => {
+        const imageBuffer = fs.readFileSync(imagePath)
+        return {
+          path: path.basename(imagePath),
+          base64: imageBuffer.toString('base64'),
+          size: imageBuffer.length
+        }
+      })
+
+      // Call Claude with vision API to analyze images
+      const contacts = await extractor.extractContactsFromImages(imageData, originalName)
+
+      const claudeTime = Date.now() - startClaudeTime
+      console.log(`✅ Claude analyzed ${imageFiles.length} images and extracted ${contacts.length} contacts in ${claudeTime}ms`)
+
+      // Save contacts to PostgreSQL
+      if (contacts.length > 0) {
+        console.log(`💾 Saving ${contacts.length} contacts to PostgreSQL...`)
+        const insertResult = await this.postgresContactService.bulkInsertContacts(
+          contacts.map(c => ({
+            ...c,
+            source_file: originalName,
+            extraction_method: 'ghostscript-claude-vision'
+          }))
+        )
+
+        if (insertResult.success) {
+          console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+        }
+      }
+
+      // Optional: Upload images to S3 for archival
+      const uploadToS3 = req.body.uploadToS3 === 'true' || req.body.uploadToS3 === true
+      let s3Keys = []
+
+      if (uploadToS3) {
+        console.log(`☁️ Uploading ${imageFiles.length} images to S3...`)
+
+        for (const imagePath of imageFiles) {
+          const imageBuffer = fs.readFileSync(imagePath)
+          const s3Key = `uploads/images/${Date.now()}-${path.basename(imagePath)}`
+          await this.s3Service.uploadBufferToS3(imageBuffer, s3Key)
+          s3Keys.push(s3Key)
+        }
+
+        console.log(`✅ Uploaded ${s3Keys.length} images to S3`)
+      }
+
+      // Cleanup temp files
+      if (fs.existsSync(uploadedFilePath)) fs.unlinkSync(uploadedFilePath)
+      if (fs.existsSync(resizedPdfPath)) fs.unlinkSync(resizedPdfPath)
+      if (outputDir && fs.existsSync(outputDir)) {
+        // Clean up original images
+        imageFiles.forEach(img => {
+          try {
+            if (fs.existsSync(img)) fs.unlinkSync(img)
+          } catch (e) {
+            console.warn(`Failed to delete ${img}: ${e.message}`)
+          }
+        })
+        // Clean up resized images
+        resizedImageFiles.forEach(img => {
+          try {
+            if (fs.existsSync(img)) fs.unlinkSync(img)
+          } catch (e) {
+            console.warn(`Failed to delete ${img}: ${e.message}`)
+          }
+        })
+        // Clean up any remaining files in the directory
+        try {
+          const remainingFiles = fs.readdirSync(outputDir)
+          remainingFiles.forEach(file => {
+            const filePath = path.join(outputDir, file)
+            try {
+              fs.unlinkSync(filePath)
+            } catch (e) {
+              console.warn(`Failed to delete ${filePath}: ${e.message}`)
+            }
+          })
+          fs.rmdirSync(outputDir)
+        } catch (e) {
+          console.warn(`Failed to remove directory ${outputDir}: ${e.message}`)
+        }
+      }
+
+      const result = {
+        success: true,
+        file: originalName,
+        method: 'ghostscript-claude-vision',
+        imagesGenerated: imageFiles.length,
+        resolution: `${resolution} DPI`,
+        gsTime: gsTime,
+        claudeTime: claudeTime,
+        contactCount: contacts.length,
+        contacts: contacts,
+        s3Keys: uploadToS3 ? s3Keys : null,
+        processingTimestamp: new Date().toISOString()
+      }
+
+      return res.status(200).json(result)
+
+    } catch (error) {
+      console.error(`❌ Claude Vision upload processing failed: ${error.message}`)
+      console.error(error.stack)
+
+      // Cleanup on error
+      try {
+        if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+          fs.unlinkSync(uploadedFilePath)
+        }
+      } catch (e) {
+        console.warn(`Failed to delete uploaded file: ${e.message}`)
+      }
+
+      try {
+        if (resizedPdfPath && fs.existsSync(resizedPdfPath)) {
+          fs.unlinkSync(resizedPdfPath)
+        }
+      } catch (e) {
+        console.warn(`Failed to delete resized PDF: ${e.message}`)
+      }
+
+      if (outputDir && fs.existsSync(outputDir)) {
+        try {
+          const files = fs.readdirSync(outputDir)
+          files.forEach(file => {
+            const filePath = path.join(outputDir, file)
+            try {
+              if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+            } catch (e) {
+              console.warn(`Failed to delete ${filePath}: ${e.message}`)
+            }
+          })
+          fs.rmdirSync(outputDir)
+        } catch (e) {
+          console.warn(`Failed to remove directory: ${e.message}`)
+        }
+      }
+
+      return res.status(500).json({
+        success: false,
+        message: `Processing failed: ${error.message}`,
+        error: error.stack
+      })
+    }
+  }
+
+  /**
    * Get OCR processing status
    */
   async getOCRStatus(req, res) {
@@ -1624,8 +1913,9 @@ module.exports.controller = (app) => {
   app.post('/v1/ocr/process-applicants', (req, res) => ocrController.processApplicantsWithOCR(req, res))
   app.post('/v1/ocr/process-applicants-local', (req, res) => ocrController.processApplicantsWithLocalOCR(req, res))
 
-  // Direct file upload endpoint - uses multer middleware
+  // Direct file upload endpoints - uses multer middleware
   app.post('/v1/ocr/upload-and-process', upload.single('pdf'), (req, res) => ocrController.uploadAndProcess(req, res))
+  app.post('/v1/ocr/upload-and-process-vision', upload.single('pdf'), (req, res) => ocrController.uploadAndProcessWithClaudeVision(req, res))
 
   // Status and configuration endpoints
   app.get('/v1/ocr/status', (req, res) => ocrController.getOCRStatus(req, res))

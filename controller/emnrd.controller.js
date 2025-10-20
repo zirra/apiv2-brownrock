@@ -311,6 +311,323 @@ class EmnrdController {
     }
   }
 
+  // Vision-based processing workflow - processes PDFs with Claude Vision (converts to images)
+  async testWithVision(req, res) {
+    const { execSync } = require('child_process')
+
+    try {
+      this.appScheduleRunning = true
+      const applicantNames = this.dataService.getApplicantNames()
+
+      for (let j = 0; j < applicantNames.length; j++) {
+        const applicant = applicantNames[j]
+        console.log(`🔍 Processing applicant with Vision: ${applicant}`)
+
+        if (!this.authService.getToken()) {
+          await this.authService.login()
+        }
+
+        const response = await this.dataService.callForData(applicant)
+
+        if (!response || !response.data || !Array.isArray(response.data.Items)) {
+          console.warn(`⚠️ No valid data returned for applicant "${applicant}". Skipping...`)
+          await this.loggingService.writeMessage('missingItems', `No Items for ${applicant}`)
+          continue
+        }
+
+        const items = response.data.Items
+        console.log(`✅ Retrieved ${items.length} items for ${applicant}`)
+
+        const allPdfs = items.flatMap(item => item.ImagingFiles || [])
+
+        if (!allPdfs.length) {
+          console.log(`📭 No ImagingFiles found for "${applicant}".`)
+          continue
+        }
+
+        for (let i = 0; i < allPdfs.length; i++) {
+          const pdf = allPdfs[i]
+          const s3Key = `vision-pdfs/${applicant}/${pdf.FileName}`
+
+          if (pdf.FileSize <= this.config.maxFileSize) {
+            let localPath = null
+            let outputDir = null
+            let resizedPdfPath = null
+
+            try {
+              this.filesToProcess.push(s3Key)
+
+              console.log(`⬇️ Downloading ${pdf.FileName} locally for Vision processing...`)
+              localPath = await this.pdfController.downloadPdfLocally(pdf.Url, pdf.FileName, applicant)
+
+              // Prepare temp directory for image output
+              const tempDir = process.env.UPLOAD_TEMP_DIR || './temp/uploads'
+              if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true })
+              }
+
+              outputDir = path.join(tempDir, `gs_images_${Date.now()}`)
+              if (!fs.existsSync(outputDir)) {
+                fs.mkdirSync(outputDir, { recursive: true })
+              }
+
+              // First, optimize/flatten the PDF with Ghostscript
+              resizedPdfPath = path.join(tempDir, `gs_resized_${Date.now()}.pdf`)
+
+              console.log(`🔧 Optimizing PDF with Ghostscript...`)
+              const gsOptimizeCommand = [
+                'gs',
+                '-sDEVICE=pdfwrite',
+                '-dCompatibilityLevel=1.4',
+                '-dPDFSETTINGS=/ebook',
+                '-dNOPAUSE',
+                '-dQUIET',
+                '-dBATCH',
+                `-sOutputFile=${resizedPdfPath}`,
+                localPath
+              ].join(' ')
+
+              execSync(gsOptimizeCommand, { stdio: 'pipe' })
+              console.log(`✅ PDF optimized`)
+
+              // Convert PDF to PNG images using Ghostscript
+              const startGsTime = Date.now()
+              const resolution = process.env.GS_IMAGE_RESOLUTION || '300' // 300 DPI default
+
+              console.log(`🖼️ Converting PDF to PNG images at ${resolution} DPI...`)
+
+              const outputPattern = path.join(outputDir, 'output_%03d.png')
+              const gsCommand = [
+                'gs',
+                '-o', outputPattern,
+                '-sDEVICE=png16m',
+                `-r${resolution}`,
+                resizedPdfPath
+              ].join(' ')
+
+              execSync(gsCommand, { stdio: 'pipe' })
+              const gsTime = Date.now() - startGsTime
+
+              console.log(`✅ Ghostscript image conversion completed in ${gsTime}ms`)
+
+              // Get list of generated images
+              const imageFiles = fs.readdirSync(outputDir)
+                .filter(file => file.endsWith('.png'))
+                .sort()
+                .map(file => path.join(outputDir, file))
+
+              if (imageFiles.length === 0) {
+                throw new Error('No images generated from PDF')
+              }
+
+              console.log(`📸 Generated ${imageFiles.length} images from PDF`)
+
+              // Resize images to meet Claude's 2000px dimension limit
+              console.log(`📐 Resizing images to meet Claude's dimension requirements...`)
+              const resizedImageFiles = []
+
+              for (const imagePath of imageFiles) {
+                const resizedPath = imagePath.replace('.png', '_resized.png')
+
+                // Check if magick (v7) is available
+                let useV7 = false
+                try {
+                  execSync('magick --version', { stdio: 'pipe' })
+                  useV7 = true
+                } catch (e) {
+                  // Fall back to convert (v6)
+                }
+
+                try {
+                  let resizeCommand
+
+                  if (useV7) {
+                    // ImageMagick v7 syntax
+                    resizeCommand = `magick "${imagePath}" -resize "1800x1800>" "${resizedPath}"`
+                  } else {
+                    // ImageMagick v6 syntax
+                    resizeCommand = `convert "${imagePath}" -resize "1800x1800>" "${resizedPath}"`
+                  }
+
+                  execSync(resizeCommand, { stdio: 'pipe', shell: true })
+                  resizedImageFiles.push(resizedPath)
+
+                  const originalSize = fs.statSync(imagePath).size
+                  const resizedSize = fs.statSync(resizedPath).size
+                  console.log(`  ✓ ${path.basename(imagePath)}: ${(originalSize/1024).toFixed(0)}KB → ${(resizedSize/1024).toFixed(0)}KB`)
+                } catch (resizeError) {
+                  console.warn(`⚠️ Failed to resize ${path.basename(imagePath)}, using original: ${resizeError.message}`)
+                  resizedImageFiles.push(imagePath)
+                }
+              }
+
+              console.log(`✅ Resized ${resizedImageFiles.length} images`)
+
+              // Send images to Claude for analysis
+              console.log(`🤖 Sending images to Claude for analysis...`)
+              const startClaudeTime = Date.now()
+
+              const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
+              const extractor = new ClaudeContactExtractor({
+                anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+                awsRegion: process.env.AWS_REGION,
+                awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+                awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+              })
+
+              // Convert resized images to base64 for Claude
+              const imageData = resizedImageFiles.map(imagePath => {
+                const imageBuffer = fs.readFileSync(imagePath)
+                return {
+                  path: path.basename(imagePath),
+                  base64: imageBuffer.toString('base64'),
+                  size: imageBuffer.length
+                }
+              })
+
+              // Call Claude with vision API to analyze images
+              const contacts = await extractor.extractContactsFromImages(imageData, pdf.FileName)
+
+              const claudeTime = Date.now() - startClaudeTime
+              console.log(`✅ Claude analyzed ${imageFiles.length} images and extracted ${contacts.length} contacts in ${claudeTime}ms`)
+
+              // Add metadata to contacts
+              const enrichedContacts = contacts.map(c => ({
+                ...c,
+                source_file: pdf.FileName,
+                record_type: applicant,
+                extraction_method: 'ghostscript-claude-vision'
+              }))
+
+              // Save to PostgreSQL
+              if (enrichedContacts.length > 0 && this.postgresContactService) {
+                console.log(`💾 Saving ${enrichedContacts.length} contacts to PostgreSQL...`)
+                const insertResult = await this.postgresContactService.bulkInsertContacts(enrichedContacts)
+                if (insertResult.success) {
+                  console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+                }
+              }
+
+              // Upload original PDF to S3
+              const pdfBuffer = fs.readFileSync(localPath)
+              console.log(`☁️ Uploading PDF to S3: ${s3Key}`)
+              await this.s3Service.uploadBufferToS3(pdfBuffer, s3Key)
+              console.log(`✅ Uploaded to S3`)
+
+              // Cleanup local files
+              if (!process.env.KEEP_LOCAL_FILES) {
+                if (localPath && fs.existsSync(localPath)) {
+                  fs.unlinkSync(localPath)
+                  console.log(`🗑️ Removed local file: ${localPath}`)
+                }
+                if (resizedPdfPath && fs.existsSync(resizedPdfPath)) {
+                  fs.unlinkSync(resizedPdfPath)
+                  console.log(`🗑️ Removed resized PDF: ${resizedPdfPath}`)
+                }
+                // Clean up images
+                if (outputDir && fs.existsSync(outputDir)) {
+                  imageFiles.forEach(img => {
+                    try {
+                      if (fs.existsSync(img)) fs.unlinkSync(img)
+                    } catch (e) {
+                      console.warn(`Failed to delete ${img}: ${e.message}`)
+                    }
+                  })
+                  resizedImageFiles.forEach(img => {
+                    try {
+                      if (fs.existsSync(img)) fs.unlinkSync(img)
+                    } catch (e) {
+                      console.warn(`Failed to delete ${img}: ${e.message}`)
+                    }
+                  })
+                  try {
+                    const remainingFiles = fs.readdirSync(outputDir)
+                    remainingFiles.forEach(file => {
+                      const filePath = path.join(outputDir, file)
+                      try {
+                        fs.unlinkSync(filePath)
+                      } catch (e) {
+                        console.warn(`Failed to delete ${filePath}: ${e.message}`)
+                      }
+                    })
+                    fs.rmdirSync(outputDir)
+                  } catch (e) {
+                    console.warn(`Failed to remove directory ${outputDir}: ${e.message}`)
+                  }
+                }
+              }
+
+              console.log(`📊 Vision processing summary for ${pdf.FileName}:`)
+              console.log(`   - Method: ghostscript-claude-vision`)
+              console.log(`   - Images generated: ${imageFiles.length}`)
+              console.log(`   - Processing time: ${gsTime + claudeTime}ms`)
+              console.log(`   - Contacts extracted: ${contacts.length}`)
+
+              console.log(`✅ Completed Vision processing: ${pdf.FileName}`)
+
+            } catch (processErr) {
+              console.error(`❌ Vision processing failed for ${pdf.FileName}: ${processErr.message}`)
+              await this.loggingService.writeMessage('visionProcessingFail', `${processErr.message} ${pdf.FileName}`)
+
+              // Cleanup on error
+              try {
+                if (localPath && fs.existsSync(localPath)) fs.unlinkSync(localPath)
+                if (resizedPdfPath && fs.existsSync(resizedPdfPath)) fs.unlinkSync(resizedPdfPath)
+                if (outputDir && fs.existsSync(outputDir)) {
+                  const files = fs.readdirSync(outputDir)
+                  files.forEach(file => {
+                    try {
+                      fs.unlinkSync(path.join(outputDir, file))
+                    } catch (e) {
+                      // Ignore cleanup errors
+                    }
+                  })
+                  try {
+                    fs.rmdirSync(outputDir)
+                  } catch (e) {
+                    // Ignore cleanup errors
+                  }
+                }
+              } catch (cleanupErr) {
+                console.error(`❌ Cleanup error: ${cleanupErr.message}`)
+              }
+            }
+
+            // Add delay between files to avoid Claude rate limits
+            if (i < allPdfs.length - 1) {
+              console.log(`⏸️ Waiting 3 seconds before next file to avoid rate limits...`)
+              await new Promise(resolve => setTimeout(resolve, 3000))
+            }
+          } else {
+            console.log(`⚠️ ${pdf.FileName} skipping due to file size (${pdf.FileSize} bytes > ${this.config.maxFileSize} bytes)`)
+          }
+        }
+      }
+
+      this.appScheduleRunning = false
+
+      if (res) {
+        return res.status(200).send({
+          message: 'Vision PDF processing completed successfully.',
+          method: 'ghostscript-claude-vision',
+          filesProcessed: this.filesToProcess.length
+        })
+      }
+
+      return true
+
+    } catch (err) {
+      console.error(`💥 Fatal error in testWithVision(): ${err.message}`)
+      await this.loggingService.writeMessage('testWithVisionFatal', err.message)
+
+      if (res) {
+        return res.status(500).send({ error: err.message })
+      }
+
+      return false
+    }
+  }
+
   getStatus(req, res) {
     res.status(200).send({
       running: this.appScheduleRunning,
@@ -634,10 +951,20 @@ class EmnrdController {
       let contacts = []
       if (processingResult.extractedText && processingResult.extractedText.length > 100) {
         console.log(`🤖 Extracting contacts with Claude AI...`)
-        const contactResult = await this.pdfService.extractContactsFromText(processingResult.extractedText)
 
-        if (contactResult.success && contactResult.contacts) {
-          contacts = contactResult.contacts.map(c => ({
+        // Use ClaudeContactExtractor directly
+        const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
+        const extractor = new ClaudeContactExtractor({
+          anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+          awsRegion: process.env.AWS_REGION,
+          awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+          awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+        })
+
+        const extractedContacts = await extractor.extractContactInfoWithClaude(processingResult.extractedText)
+
+        if (extractedContacts && extractedContacts.length > 0) {
+          contacts = extractedContacts.map(c => ({
             ...c,
             source_file: originalName,
             record_type: applicantName
@@ -902,6 +1229,68 @@ class EmnrdController {
     } else {
       console.log('⏸️ S3 PDF Analysis cron job is disabled')
     }
+
+    // Vision Processing Job - Uses Claude Vision API (converts PDFs to images)
+    const visionCronEnabled = process.env.VISION_CRON_ENABLED === 'true'
+    const visionCronSchedule = process.env.VISION_CRON_SCHEDULE || '0 4 * * 4' // Thursdays at 4 AM by default
+
+    if (visionCronEnabled) {
+      console.log(`🎨 Initializing Vision Processing cron job: ${visionCronSchedule}`)
+      cron.schedule(visionCronSchedule, async () => {
+        this.filesToProcess = []
+        try {
+          console.log(`[${new Date().toISOString()}] 🎨 Starting scheduled Vision Processing Job`)
+
+          await this.authService.writeDynamoMessage({
+            pkey: 'schedule#visionProcessing',
+            skey: 'schedule#start',
+            origin: 'scheduler',
+            type: 'system',
+            data: 'SUCCESS: Started Vision Processing Job'
+          })
+
+          console.log('Start Vision Processing Success')
+
+          this.appScheduleRunning = true
+          await this.loggingService.writeMessage('visionProcessingStart', 'started')
+          await this.testWithVision()
+          await this.loggingService.writeMessage('visionProcessingComplete', 'success')
+
+          await this.authService.writeDynamoMessage({
+            pkey: 'schedule#visionProcessing',
+            skey: 'schedule#complete',
+            origin: 'scheduler',
+            type: 'system',
+            data: `SUCCESS: Vision Processing Complete - ${this.filesToProcess.length} files processed`
+          })
+
+          console.log('Completed Vision Processing Success')
+          console.log('-----------------------------------')
+          console.log('✅ All PDFs processed with Claude Vision (Ghostscript + Image Analysis)')
+          console.log('💾 Contacts already saved to PostgreSQL during processing')
+          console.log('-----------------------------------')
+
+          console.log('Vision processing job complete')
+          this.appScheduleRunning = false
+        } catch (e) {
+          console.log('----------- Vision Processing Failure ---------------')
+          console.log(e)
+          await this.loggingService.writeMessage('visionScheduleFailed', e.message)
+
+          await this.authService.writeDynamoMessage({
+            pkey: 'schedule#visionProcessing',
+            skey: 'error#failed',
+            origin: 'scheduler',
+            type: 'system',
+            data: `FAILURE: ${e.message}`
+          })
+          console.log('----------- Vision Processing Failure ---------------')
+          this.appScheduleRunning = false
+        }
+      })
+    } else {
+      console.log('⏸️ Vision Processing cron job is disabled (set VISION_CRON_ENABLED=true to enable)')
+    }
   }
 }
 
@@ -917,6 +1306,7 @@ module.exports.controller = (app) => {
   // Core workflow routes
   app.get('/v1/running', (req, res) => emnrdController.getStatus(req, res))
   app.get('/v1/force', (req, res) => emnrdController.test(req, res))
+  app.get('/v1/force-vision', (req, res) => emnrdController.testWithVision(req, res))
 
   // Single file upload endpoints - uses multer middleware
   app.post('/v1/emnrd/upload-and-process', upload.single('pdf'), (req, res) => emnrdController.uploadAndProcess(req, res))
