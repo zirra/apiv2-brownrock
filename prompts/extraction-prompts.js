@@ -15,9 +15,7 @@ module.exports = {
    * For extracting contact information from oil & gas documents
    */
   'oil-gas-contacts': {
-    native: `Extract contact information from this oil & gas document.
-
-⚠️ RESPONSE FORMAT: Return ONLY a valid JSON array. No explanatory text before or after. Start with [ and end with ]. Nothing else.
+    native: `Extract contact information from this oil & gas document. Return JSON array only.
 
 ⚠️ CRITICAL MULTI-PAGE INSTRUCTION:
 You are viewing ALL pages of this document at once. Tables often span MULTIPLE pages.
@@ -146,21 +144,6 @@ Before you finalize your response, verify:
 3. Count your extracted entries - if the document shows "X recipients" and you have fewer, go back and extract the missing pages
 4. Look for page numbers or table row numbers that indicate continuation (e.g., entries 1-50 on page 1, entries 51-100 on page 2, etc.)
 5. Postal delivery tables are the PRIMARY source - make sure you got EVERY recipient from EVERY page
-
-⚠️ CRITICAL OUTPUT FORMAT:
-Your response must be ONLY the JSON array. Example:
-[
-  {"company": "Example Corp", "name": null, ...},
-  {"company": null, "name": "John Doe", ...}
-]
-
-DO NOT include:
-- Explanatory text like "Here are the contacts I found..."
-- Summary text like "I extracted 34 contacts from 5 pages"
-- Notes about the extraction process
-- Any text before the opening [ or after the closing ]
-
-Start your response with [ and end with ]. Nothing else.
 
 POSTAL DELIVERY TABLE EXAMPLES:
 
