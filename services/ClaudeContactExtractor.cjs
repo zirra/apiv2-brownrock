@@ -99,7 +99,64 @@ class ClaudeContactExtractor {
     return result
   }
 
-  
+  /**
+   * Extract JSON array from text with balanced bracket matching
+   * Handles cases where there's text before/after the JSON array
+   * @param {string} text - Text containing JSON array
+   * @returns {string|null} - Extracted JSON array string or null
+   */
+  extractJsonArray(text) {
+    // Find the first opening bracket
+    const startIndex = text.indexOf('[')
+    if (startIndex === -1) {
+      return null
+    }
+
+    // Count brackets to find the matching closing bracket
+    let bracketCount = 0
+    let inString = false
+    let escaped = false
+
+    for (let i = startIndex; i < text.length; i++) {
+      const char = text[i]
+
+      // Handle escape sequences
+      if (escaped) {
+        escaped = false
+        continue
+      }
+
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+
+      // Track if we're inside a string (to ignore brackets in strings)
+      if (char === '"') {
+        inString = !inString
+        continue
+      }
+
+      // Only count brackets outside of strings
+      if (!inString) {
+        if (char === '[') {
+          bracketCount++
+        } else if (char === ']') {
+          bracketCount--
+
+          // When brackets are balanced, we found the end
+          if (bracketCount === 0) {
+            return text.substring(startIndex, i + 1)
+          }
+        }
+      }
+    }
+
+    // If we get here, brackets weren't balanced
+    return null
+  }
+
+
   /**
    * Extract text content from PDF buffer (basic method)
    */
@@ -1255,15 +1312,26 @@ class ClaudeContactExtractor {
 
         this.logger.info(`📦 Split into ${batches.length} batches`)
 
-        // Process each batch
+        // Process each batch with context from previous batches
         let allContacts = []
         for (let i = 0; i < batches.length; i++) {
           const batch = batches[i]
           const batchSize = batch.reduce((sum, img) => sum + img.size, 0)
           this.logger.info(`🔄 Processing batch ${i + 1}/${batches.length} (${batch.length} images, ${(batchSize/1024/1024).toFixed(2)}MB)...`)
 
-          const batchContacts = await this.processSingleImageBatch(batch, prompt, filename, retryCount)
+          // Add context about previous batches to help with continuity
+          let batchPrompt = prompt
+          if (i > 0) {
+            const previousContactCount = allContacts.length
+            batchPrompt = `CONTEXT: This is batch ${i + 1} of ${batches.length}. You have already extracted ${previousContactCount} contacts from previous pages. Continue extracting from these pages, watching for table continuations from the previous batch. Do not re-extract contacts you've already seen.\n\n${prompt}`
+          } else {
+            batchPrompt = `This is batch 1 of ${batches.length} total batches. More pages will follow. ${prompt}`
+          }
+
+          const batchContacts = await this.processSingleImageBatch(batch, batchPrompt, filename, retryCount)
           allContacts = allContacts.concat(batchContacts)
+
+          this.logger.info(`📊 Batch ${i + 1} complete: ${batchContacts.length} contacts (${allContacts.length} total so far)`)
 
           // Delay between batches to avoid rate limits
           if (i < batches.length - 1) {
@@ -1318,7 +1386,7 @@ class ClaudeContactExtractor {
 
       const response = await this.anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 8000,
+        max_tokens: 16000, // Increased from 8000 to handle large multi-page tables
         messages: [{
           role: "user",
           content: content
@@ -1327,17 +1395,26 @@ class ClaudeContactExtractor {
 
       const responseText = response.content[0].text;
 
-      // Extract JSON from response
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        const contacts = JSON.parse(jsonMatch[0]);
-        const validContacts = Array.isArray(contacts) ? contacts : [];
-        this.logger.info(`✅ Claude vision analysis successful: extracted ${validContacts.length} contacts from ${imageData.length} images`);
-        return validContacts;
-      } else {
-        this.logger.warn('No JSON array found in Claude response');
-        return [];
+      // Extract JSON from response - improved to handle text before/after JSON
+      let contacts = []
+
+      try {
+        // Method 1: Try to find JSON array with balanced brackets
+        const jsonMatch = this.extractJsonArray(responseText)
+        if (jsonMatch) {
+          contacts = JSON.parse(jsonMatch)
+          const validContacts = Array.isArray(contacts) ? contacts : []
+          this.logger.info(`✅ Claude vision analysis successful: extracted ${validContacts.length} contacts from ${imageData.length} images`)
+          return validContacts
+        }
+      } catch (parseError) {
+        this.logger.error(`❌ JSON parsing failed: ${parseError.message}`)
+        this.logger.error(`Response text (first 500 chars): ${responseText.substring(0, 500)}`)
+        this.logger.error(`Response text (last 500 chars): ${responseText.substring(responseText.length - 500)}`)
       }
+
+      this.logger.warn('No valid JSON array found in Claude response')
+      return []
 
     } catch (error) {
       this.logger.error('Error processing image batch with Claude vision:', error.message);

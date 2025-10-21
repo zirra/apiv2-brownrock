@@ -15,7 +15,17 @@ module.exports = {
    * For extracting contact information from oil & gas documents
    */
   'oil-gas-contacts': {
-    native: `Extract contact information from this oil & gas document. Return JSON array only.
+    native: `Extract contact information from this oil & gas document.
+
+⚠️ RESPONSE FORMAT: Return ONLY a valid JSON array. No explanatory text before or after. Start with [ and end with ]. Nothing else.
+
+⚠️ CRITICAL MULTI-PAGE INSTRUCTION:
+You are viewing ALL pages of this document at once. Tables often span MULTIPLE pages.
+- Scan EVERY page for table continuations
+- A table that starts on page 1 may continue on pages 2, 3, 4, etc.
+- Look for consistent column structures across pages (same headers/format)
+- Extract EVERY row from ALL pages - do not stop after the first page
+- Count total entries to verify completeness (e.g., if you see "34 entries" but table continues, keep extracting)
 
 EXTRACT:
 - Names (individuals, companies, trusts)
@@ -24,19 +34,20 @@ EXTRACT:
 - Ownership info (percentages, interest types)
 - Mineral rights ownership percentage (as decimal, e.g., 25.5 for 25.5%)
 
-PRIORITY SOURCES (extract ALL):
+PRIORITY SOURCES (extract ALL from ALL pages):
 - **POSTAL DELIVERY REPORTS/TABLES** (MOST CRITICAL - contains certified mail recipients)
   * Tables titled "Postal Delivery Report" or similar
   * Identified by USPS tracking numbers (starting with 9414...) in first column
   * Column structure: Tracking# | Name | Address | City | State | Zip | Delivery Status
-  * Extract ALL entries - these are verified recipients of notice
+  * ⚠️ THESE TABLES SPAN MULTIPLE PAGES - Extract from ALL pages, not just the first
+  * Extract ALL entries across all pages - these are verified recipients of notice
   * Ignore tracking numbers themselves, but use them to identify postal tables
   * Combine address fields into complete address
   * Include delivery status/date in notes field
-- Transaction report, Transaction Report Details, CertifiedPro.net reports
-- **Tables with columns like "Name 1", "Name 2", "Address1", "Address2" - these are recipient lists**
-- Interest owner tables (WI, ORRI, MI, UMI owners)
-- Revenue/mailing lists
+- Transaction report, Transaction Report Details, CertifiedPro.net reports (check all pages)
+- **Tables with columns like "Name 1", "Name 2", "Address1", "Address2" - recipient lists (multi-page)**
+- Interest owner tables (WI, ORRI, MI, UMI owners) - check all pages
+- Revenue/mailing lists - check all pages
 - **Tract ownership breakdowns (pages with "Summary of Interests" by tract)**
 - **Unit-level ownership summaries (consolidated ownership across all tracts)**
 
@@ -47,8 +58,10 @@ POSTAL DELIVERY TABLES (CRITICAL IDENTIFICATION):
 - Extract from columns: Name | Address | City | State | Zip | Delivery Status
 - Combine address components: "Address, City, State Zip"
 - Put delivery confirmation in notes field (e.g., "Delivered June 13, 2025", "Picked up June 10, 2025")
-- Extract ALL rows from these tables - they represent certified mail recipients
-- These tables may span multiple pages - continue extraction across page breaks
+- ⚠️ CRITICAL: Extract ALL rows from EVERY PAGE where this table continues
+- These tables typically span 3-10+ pages - scan the ENTIRE document for continuation rows
+- Same column structure = same table continuation (even if headers don't repeat on every page)
+- Do not stop extraction until you've checked every page in the document
 
 SPECIAL FORMATS:
 - **For tables with "Name 1" and "Name 2" columns:**
@@ -61,6 +74,7 @@ SPECIAL FORMATS:
   * Status column shows delivery confirmation - include in notes
 - Combine Address1 and Address2 fields into complete address
 - Extract all rows regardless of "Mailing Status" column
+- **For tables with no headers analyze them for the contact data that we are collecting
 
 OWNERSHIP STRUCTURE:
 - Units contain multiple Tracts
@@ -124,6 +138,29 @@ Requirements:
 - When uncertain if legal professional, exclude UNLESS from postal/interest table
 - For parties marked "Stranger in title" or "Notify" status, include them with whatever information is available
 - No text outside JSON array
+
+⚠️ FINAL VERIFICATION BEFORE RESPONDING:
+Before you finalize your response, verify:
+1. Did you scan ALL pages of the document? (Not just page 1)
+2. Did you extract from ALL pages where tables continue? (Tables often span 5-10+ pages)
+3. Count your extracted entries - if the document shows "X recipients" and you have fewer, go back and extract the missing pages
+4. Look for page numbers or table row numbers that indicate continuation (e.g., entries 1-50 on page 1, entries 51-100 on page 2, etc.)
+5. Postal delivery tables are the PRIMARY source - make sure you got EVERY recipient from EVERY page
+
+⚠️ CRITICAL OUTPUT FORMAT:
+Your response must be ONLY the JSON array. Example:
+[
+  {"company": "Example Corp", "name": null, ...},
+  {"company": null, "name": "John Doe", ...}
+]
+
+DO NOT include:
+- Explanatory text like "Here are the contacts I found..."
+- Summary text like "I extracted 34 contacts from 5 pages"
+- Notes about the extraction process
+- Any text before the opening [ or after the closing ]
+
+Start your response with [ and end with ]. Nothing else.
 
 POSTAL DELIVERY TABLE EXAMPLES:
 
