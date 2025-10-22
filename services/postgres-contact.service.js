@@ -19,7 +19,10 @@ class PostgresContactService {
     if (claudeContact.fax) phones.push(claudeContact.fax);
 
     const emails = [];
-    if (claudeContact.email) emails.push(claudeContact.email);
+    if (claudeContact.email) {
+      const validatedEmail = this.validateEmail(claudeContact.email);
+      if (validatedEmail) emails.push(validatedEmail);
+    }
 
     // Handle name splitting - prioritize existing first_name/last_name, then split full name
     let firstName = claudeContact.first_name || '';
@@ -139,6 +142,40 @@ class PostgresContactService {
     }
 
     return { street, city, state, zip, unit };
+  }
+
+  /**
+   * Validate and clean email address
+   * Returns cleaned email or null if invalid
+   */
+  validateEmail(email) {
+    if (!email || typeof email !== 'string') return null;
+
+    // Clean the email
+    let cleaned = email.trim().toLowerCase();
+
+    // Remove any surrounding quotes or brackets
+    cleaned = cleaned.replace(/^["'<[]+|["'>\]]+$/g, '');
+
+    // Basic email regex (simple but effective)
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (!emailRegex.test(cleaned)) {
+      console.warn(`⚠️ Invalid email format rejected: "${email}"`);
+      return null;
+    }
+
+    // Additional checks for common issues
+    if (cleaned.includes('..')) return null; // Double dots
+    if (cleaned.includes('@.')) return null; // @ followed by dot
+    if (cleaned.includes('.@')) return null; // Dot followed by @
+    if (cleaned.startsWith('.')) return null; // Starts with dot
+    if (cleaned.endsWith('.')) return null; // Ends with dot
+
+    // Length check
+    if (cleaned.length < 5 || cleaned.length > 254) return null;
+
+    return cleaned;
   }
 
   /**
@@ -275,7 +312,34 @@ class PostgresContactService {
           path: e.path,
           value: e.value
         })));
+
+        // Try to find and log the problematic record
+        for (const err of error.errors) {
+          if (err.record) {
+            console.error('Problematic record:', JSON.stringify({
+              name: err.record.name,
+              company: err.record.llc_owner,
+              email1: err.record.email1,
+              email2: err.record.email2,
+              source_file: err.record.source_file
+            }, null, 2));
+          }
+        }
       }
+
+      // Try to identify which email is causing the problem
+      if (error.message.includes('email')) {
+        console.error('\n🔍 Scanning for invalid emails in batch:');
+        uniqueContacts.forEach((contact, idx) => {
+          if (contact.email1 && !this.validateEmail(contact.email1)) {
+            console.error(`  Invalid email1 at index ${idx}: "${contact.email1}" (contact: ${contact.name || contact.llc_owner})`);
+          }
+          if (contact.email2 && !this.validateEmail(contact.email2)) {
+            console.error(`  Invalid email2 at index ${idx}: "${contact.email2}" (contact: ${contact.name || contact.llc_owner})`);
+          }
+        });
+      }
+
       return {
         success: false,
         error: error.message,
