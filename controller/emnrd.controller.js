@@ -405,14 +405,26 @@ class EmnrdController {
                 }
 
                 // Quick validation: Check if file starts with PDF header
-                const fileBuffer = fs.readFileSync(localPath, { encoding: 'utf8', flag: 'r' })
-                const header = fileBuffer.substring(0, 5)
+                const fileBuffer = fs.readFileSync(localPath)
+                const header = fileBuffer.toString('ascii', 0, 5)
+
                 if (header !== '%PDF-') {
-                  const preview = fileBuffer.substring(0, 100)
-                  throw new Error(`Invalid PDF header: "${header}". Content preview: ${preview}`)
+                  // Get more detailed preview
+                  const textPreview = fileBuffer.toString('utf8', 0, Math.min(500, fileBuffer.length))
+                  const hexPreview = fileBuffer.toString('hex', 0, Math.min(100, fileBuffer.length))
+
+                  console.error(`\n🔍 FILE DIAGNOSTIC FOR ${pdf.FileName}:`)
+                  console.error(`   File size: ${fileStats.size} bytes`)
+                  console.error(`   Header (first 5 bytes): "${header}"`)
+                  console.error(`   Hex dump (first 100 bytes): ${hexPreview}`)
+                  console.error(`   Text preview (first 500 chars):\n${textPreview}`)
+
+                  throw new Error(`Invalid PDF header: "${header}". File appears to be: ${this.detectFileType(fileBuffer)}`)
                 }
 
-                console.log(`✅ PDF validation passed (${(fileStats.size / 1024).toFixed(1)} KB)`)
+                // Additional validation: Check PDF version
+                const pdfVersion = fileBuffer.toString('ascii', 0, 8)
+                console.log(`✅ PDF validation passed (${(fileStats.size / 1024).toFixed(1)} KB, ${pdfVersion})`)
               } catch (validationError) {
                 metrics.validationFailed++
                 metrics.skippedFiles.push({ file: pdf.FileName, reason: 'Validation failed', error: validationError.message })
@@ -495,19 +507,85 @@ class EmnrdController {
                 // If conversion fails completely, try with error recovery flags
                 console.warn(`⚠️ First conversion attempt failed, trying with error recovery...`)
 
-                const gsRecoveryCommand = [
-                  'gs',
-                  '-o', outputPattern,
-                  '-sDEVICE=png16m',
-                  `-r${resolution}`,
-                  '-dPDFSTOPONERROR=false',  // Don't stop on errors
-                  '-dNOSAFER',               // Allow more operations
-                  pdfToConvert
-                ].join(' ')
+                try {
+                  const gsRecoveryCommand = [
+                    'gs',
+                    '-o', outputPattern,
+                    '-sDEVICE=png16m',
+                    `-r${resolution}`,
+                    '-dPDFSTOPONERROR=false',  // Don't stop on errors
+                    '-dNOSAFER',               // Allow more operations
+                    pdfToConvert
+                  ].join(' ')
 
-                execSync(gsRecoveryCommand, { stdio: 'pipe' })
-                gsTime = Date.now() - startGsTime
-                console.log(`✅ Ghostscript conversion succeeded with recovery mode in ${gsTime}ms`)
+                  execSync(gsRecoveryCommand, { stdio: 'pipe' })
+                  gsTime = Date.now() - startGsTime
+                  console.log(`✅ Ghostscript conversion succeeded with recovery mode in ${gsTime}ms`)
+                } catch (gsRecoveryError) {
+                  // Ghostscript completely failed - fall back to Claude Native PDF processing
+                  console.warn(`⚠️ Ghostscript failed completely, falling back to Claude Native PDF processing...`)
+
+                  const pdfBuffer = fs.readFileSync(localPath)
+                  const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
+                  const extractor = new ClaudeContactExtractor({
+                    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+                    awsRegion: process.env.AWS_REGION,
+                    awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
+                    awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+                  })
+
+                  const startNativeTime = Date.now()
+                  const contacts = await extractor.extractContactsFromPDFNative(pdfBuffer, pdf.FileName)
+                  const nativeTime = Date.now() - startNativeTime
+
+                  console.log(`✅ Claude Native PDF processing succeeded in ${nativeTime}ms: ${contacts.length} contacts`)
+
+                  // Add metadata to contacts
+                  const enrichedContacts = contacts.map(c => ({
+                    ...c,
+                    source_file: pdf.FileName,
+                    record_type: applicant,
+                    extraction_method: 'claude-native-pdf-fallback'
+                  }))
+
+                  // Save to PostgreSQL
+                  if (enrichedContacts.length > 0 && this.postgresContactService) {
+                    console.log(`💾 Saving ${enrichedContacts.length} contacts to PostgreSQL...`)
+                    const insertResult = await this.postgresContactService.bulkInsertContacts(enrichedContacts)
+                    if (insertResult.success) {
+                      console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+                      metrics.totalContacts += insertResult.insertedCount
+                    }
+                  }
+
+                  metrics.successfullyProcessed++
+
+                  // Upload original PDF to S3
+                  console.log(`☁️ Uploading PDF to S3: ${s3Key}`)
+                  await this.s3Service.uploadBufferToS3(pdfBuffer, s3Key)
+                  console.log(`✅ Uploaded to S3`)
+
+                  // Cleanup
+                  if (!process.env.KEEP_LOCAL_FILES) {
+                    if (localPath && fs.existsSync(localPath)) {
+                      fs.unlinkSync(localPath)
+                      console.log(`🗑️ Removed local file: ${localPath}`)
+                    }
+                    if (resizedPdfPath && fs.existsSync(resizedPdfPath)) {
+                      fs.unlinkSync(resizedPdfPath)
+                      console.log(`🗑️ Removed resized PDF: ${resizedPdfPath}`)
+                    }
+                  }
+
+                  console.log(`📊 Native PDF fallback summary for ${pdf.FileName}:`)
+                  console.log(`   - Method: claude-native-pdf-fallback (Ghostscript failed)`)
+                  console.log(`   - Processing time: ${nativeTime}ms`)
+                  console.log(`   - Contacts extracted: ${contacts.length}`)
+                  console.log(`✅ Completed with fallback method: ${pdf.FileName}`)
+
+                  // Skip the rest of the vision processing (images, etc.)
+                  continue
+                }
               }
 
               // Get list of generated images
@@ -762,6 +840,24 @@ class EmnrdController {
 
       return false
     }
+  }
+
+  // Helper method to detect file type from buffer
+  detectFileType(buffer) {
+    const header = buffer.toString('hex', 0, Math.min(20, buffer.length))
+    const text = buffer.toString('utf8', 0, Math.min(100, buffer.length))
+
+    // Common file signatures
+    if (header.startsWith('25504446')) return 'PDF'
+    if (header.startsWith('ffd8ff')) return 'JPEG image'
+    if (header.startsWith('89504e47')) return 'PNG image'
+    if (header.startsWith('474946')) return 'GIF image'
+    if (text.startsWith('<!DOCTYPE') || text.startsWith('<html')) return 'HTML document'
+    if (text.startsWith('<?xml')) return 'XML document'
+    if (text.startsWith('{') || text.startsWith('[')) return 'JSON document'
+    if (header.startsWith('504b0304')) return 'ZIP/Office document'
+
+    return 'Unknown file type'
   }
 
   getStatus(req, res) {
