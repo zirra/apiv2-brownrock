@@ -315,6 +315,17 @@ class EmnrdController {
   async testWithVision(req, res) {
     const { execSync } = require('child_process')
 
+    // Track processing metrics
+    const metrics = {
+      totalFiles: 0,
+      downloadFailed: 0,
+      validationFailed: 0,
+      processingFailed: 0,
+      successfullyProcessed: 0,
+      totalContacts: 0,
+      skippedFiles: []
+    }
+
     try {
       this.appScheduleRunning = true
       const applicantNames = this.dataService.getApplicantNames()
@@ -350,6 +361,7 @@ class EmnrdController {
           const s3Key = `vision-pdfs/${applicant}/${pdf.FileName}`
 
           if (pdf.FileSize <= this.config.maxFileSize) {
+            metrics.totalFiles++
             let localPath = null
             let outputDir = null
             let resizedPdfPath = null
@@ -357,26 +369,69 @@ class EmnrdController {
             try {
               this.filesToProcess.push(s3Key)
 
+              // Download PDF with error handling
               console.log(`⬇️ Downloading ${pdf.FileName} locally for Vision processing...`)
-              localPath = await this.pdfController.downloadPdfLocally(pdf.Url, pdf.FileName, applicant)
 
-              // Validate PDF file
               try {
+                localPath = await this.pdfController.downloadPdfLocally(pdf.Url, pdf.FileName, applicant)
+              } catch (downloadError) {
+                metrics.downloadFailed++
+                metrics.skippedFiles.push({ file: pdf.FileName, reason: 'Download failed', error: downloadError.message })
+                console.error(`❌ Download failed for ${pdf.FileName}: ${downloadError.message}`)
+                await this.loggingService.writeMessage('visionDownloadFailed', `${pdf.FileName}: ${downloadError.message}`)
+
+                // Skip this file and continue to next
+                console.log(`⏭️ Skipping ${pdf.FileName} due to download failure`)
+                continue
+              }
+
+              // Validate downloaded file exists and is valid
+              try {
+                // Check file exists
+                if (!fs.existsSync(localPath)) {
+                  throw new Error('Downloaded file does not exist on disk')
+                }
+
                 const fileStats = fs.statSync(localPath)
+
+                // Check file is not empty
                 if (fileStats.size === 0) {
                   throw new Error('Downloaded file is empty (0 bytes)')
+                }
+
+                // Check minimum size (PDFs are typically > 1KB)
+                if (fileStats.size < 1024) {
+                  throw new Error(`File too small (${fileStats.size} bytes) - likely corrupt or error page`)
                 }
 
                 // Quick validation: Check if file starts with PDF header
                 const fileBuffer = fs.readFileSync(localPath, { encoding: 'utf8', flag: 'r' })
                 const header = fileBuffer.substring(0, 5)
                 if (header !== '%PDF-') {
-                  throw new Error(`Invalid PDF header: "${header}". File may be corrupted.`)
+                  const preview = fileBuffer.substring(0, 100)
+                  throw new Error(`Invalid PDF header: "${header}". Content preview: ${preview}`)
                 }
 
                 console.log(`✅ PDF validation passed (${(fileStats.size / 1024).toFixed(1)} KB)`)
               } catch (validationError) {
-                throw new Error(`PDF validation failed: ${validationError.message}`)
+                metrics.validationFailed++
+                metrics.skippedFiles.push({ file: pdf.FileName, reason: 'Validation failed', error: validationError.message })
+                console.error(`❌ PDF validation failed for ${pdf.FileName}: ${validationError.message}`)
+                await this.loggingService.writeMessage('visionValidationFailed', `${pdf.FileName}: ${validationError.message}`)
+
+                // Clean up invalid file
+                if (localPath && fs.existsSync(localPath)) {
+                  try {
+                    fs.unlinkSync(localPath)
+                    console.log(`🗑️ Removed invalid file: ${localPath}`)
+                  } catch (cleanupErr) {
+                    console.warn(`⚠️ Could not remove invalid file: ${cleanupErr.message}`)
+                  }
+                }
+
+                // Skip this file and continue to next
+                console.log(`⏭️ Skipping ${pdf.FileName} due to validation failure`)
+                continue
               }
 
               // Prepare temp directory for image output
@@ -550,8 +605,11 @@ class EmnrdController {
                 const insertResult = await this.postgresContactService.bulkInsertContacts(enrichedContacts)
                 if (insertResult.success) {
                   console.log(`✅ Saved ${insertResult.insertedCount} contacts to PostgreSQL`)
+                  metrics.totalContacts += insertResult.insertedCount
                 }
               }
+
+              metrics.successfullyProcessed++
 
               // Upload original PDF to S3
               const pdfBuffer = fs.readFileSync(localPath)
@@ -611,6 +669,8 @@ class EmnrdController {
               console.log(`✅ Completed Vision processing: ${pdf.FileName}`)
 
             } catch (processErr) {
+              metrics.processingFailed++
+              metrics.skippedFiles.push({ file: pdf.FileName, reason: 'Processing failed', error: processErr.message })
               console.error(`❌ Vision processing failed for ${pdf.FileName}: ${processErr.message}`)
               await this.loggingService.writeMessage('visionProcessingFail', `${processErr.message} ${pdf.FileName}`)
 
@@ -651,11 +711,42 @@ class EmnrdController {
 
       this.appScheduleRunning = false
 
+      // Print comprehensive summary
+      console.log('\n═══════════════════════════════════════════════════════════')
+      console.log('📊 VISION PROCESSING JOB SUMMARY')
+      console.log('═══════════════════════════════════════════════════════════')
+      console.log(`Total files attempted:      ${metrics.totalFiles}`)
+      console.log(`✅ Successfully processed:   ${metrics.successfullyProcessed}`)
+      console.log(`❌ Download failed:          ${metrics.downloadFailed}`)
+      console.log(`❌ Validation failed:        ${metrics.validationFailed}`)
+      console.log(`❌ Processing failed:        ${metrics.processingFailed}`)
+      console.log(`📇 Total contacts extracted: ${metrics.totalContacts}`)
+      console.log('───────────────────────────────────────────────────────────')
+
+      if (metrics.skippedFiles.length > 0) {
+        console.log(`\n⚠️ SKIPPED FILES (${metrics.skippedFiles.length}):`)
+        metrics.skippedFiles.forEach((skip, idx) => {
+          console.log(`${idx + 1}. ${skip.file}`)
+          console.log(`   Reason: ${skip.reason}`)
+          console.log(`   Error: ${skip.error}`)
+        })
+      }
+
+      console.log('═══════════════════════════════════════════════════════════\n')
+
       if (res) {
         return res.status(200).send({
-          message: 'Vision PDF processing completed successfully.',
+          message: 'Vision PDF processing completed.',
           method: 'ghostscript-claude-vision',
-          filesProcessed: this.filesToProcess.length
+          metrics: {
+            totalFiles: metrics.totalFiles,
+            successfullyProcessed: metrics.successfullyProcessed,
+            downloadFailed: metrics.downloadFailed,
+            validationFailed: metrics.validationFailed,
+            processingFailed: metrics.processingFailed,
+            totalContacts: metrics.totalContacts,
+            skippedFiles: metrics.skippedFiles
+          }
         })
       }
 
