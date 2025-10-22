@@ -360,6 +360,25 @@ class EmnrdController {
               console.log(`⬇️ Downloading ${pdf.FileName} locally for Vision processing...`)
               localPath = await this.pdfController.downloadPdfLocally(pdf.Url, pdf.FileName, applicant)
 
+              // Validate PDF file
+              try {
+                const fileStats = fs.statSync(localPath)
+                if (fileStats.size === 0) {
+                  throw new Error('Downloaded file is empty (0 bytes)')
+                }
+
+                // Quick validation: Check if file starts with PDF header
+                const fileBuffer = fs.readFileSync(localPath, { encoding: 'utf8', flag: 'r' })
+                const header = fileBuffer.substring(0, 5)
+                if (header !== '%PDF-') {
+                  throw new Error(`Invalid PDF header: "${header}". File may be corrupted.`)
+                }
+
+                console.log(`✅ PDF validation passed (${(fileStats.size / 1024).toFixed(1)} KB)`)
+              } catch (validationError) {
+                throw new Error(`PDF validation failed: ${validationError.message}`)
+              }
+
               // Prepare temp directory for image output
               const tempDir = process.env.UPLOAD_TEMP_DIR || './temp/uploads'
               if (!fs.existsSync(tempDir)) {
@@ -371,24 +390,32 @@ class EmnrdController {
                 fs.mkdirSync(outputDir, { recursive: true })
               }
 
-              // First, optimize/flatten the PDF with Ghostscript
+              // First, try to optimize/flatten the PDF with Ghostscript
               resizedPdfPath = path.join(tempDir, `gs_resized_${Date.now()}.pdf`)
+              let pdfToConvert = localPath // Default to original file
+              let gsTime = 0
 
-              console.log(`🔧 Optimizing PDF with Ghostscript...`)
-              const gsOptimizeCommand = [
-                'gs',
-                '-sDEVICE=pdfwrite',
-                '-dCompatibilityLevel=1.4',
-                '-dPDFSETTINGS=/ebook',
-                '-dNOPAUSE',
-                '-dQUIET',
-                '-dBATCH',
-                `-sOutputFile=${resizedPdfPath}`,
-                localPath
-              ].join(' ')
+              try {
+                console.log(`🔧 Optimizing PDF with Ghostscript...`)
+                const gsOptimizeCommand = [
+                  'gs',
+                  '-sDEVICE=pdfwrite',
+                  '-dCompatibilityLevel=1.4',
+                  '-dPDFSETTINGS=/ebook',
+                  '-dNOPAUSE',
+                  '-dQUIET',
+                  '-dBATCH',
+                  `-sOutputFile=${resizedPdfPath}`,
+                  localPath
+                ].join(' ')
 
-              execSync(gsOptimizeCommand, { stdio: 'pipe' })
-              console.log(`✅ PDF optimized`)
+                execSync(gsOptimizeCommand, { stdio: 'pipe' })
+                console.log(`✅ PDF optimized`)
+                pdfToConvert = resizedPdfPath // Use optimized version
+              } catch (gsOptimizeError) {
+                console.warn(`⚠️ PDF optimization failed, will try converting original file directly: ${gsOptimizeError.message}`)
+                // Continue with original file
+              }
 
               // Convert PDF to PNG images using Ghostscript
               const startGsTime = Date.now()
@@ -402,13 +429,31 @@ class EmnrdController {
                 '-o', outputPattern,
                 '-sDEVICE=png16m',
                 `-r${resolution}`,
-                resizedPdfPath
+                pdfToConvert
               ].join(' ')
 
-              execSync(gsCommand, { stdio: 'pipe' })
-              const gsTime = Date.now() - startGsTime
+              try {
+                execSync(gsCommand, { stdio: 'pipe' })
+                gsTime = Date.now() - startGsTime
+                console.log(`✅ Ghostscript image conversion completed in ${gsTime}ms`)
+              } catch (gsConvertError) {
+                // If conversion fails completely, try with error recovery flags
+                console.warn(`⚠️ First conversion attempt failed, trying with error recovery...`)
 
-              console.log(`✅ Ghostscript image conversion completed in ${gsTime}ms`)
+                const gsRecoveryCommand = [
+                  'gs',
+                  '-o', outputPattern,
+                  '-sDEVICE=png16m',
+                  `-r${resolution}`,
+                  '-dPDFSTOPONERROR=false',  // Don't stop on errors
+                  '-dNOSAFER',               // Allow more operations
+                  pdfToConvert
+                ].join(' ')
+
+                execSync(gsRecoveryCommand, { stdio: 'pipe' })
+                gsTime = Date.now() - startGsTime
+                console.log(`✅ Ghostscript conversion succeeded with recovery mode in ${gsTime}ms`)
+              }
 
               // Get list of generated images
               const imageFiles = fs.readdirSync(outputDir)
