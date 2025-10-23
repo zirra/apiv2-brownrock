@@ -18,6 +18,373 @@ module.exports = {
     native: `Extract contact information from this oil & gas document. Return JSON array only.
 
 ⚠️ CRITICAL MULTI-PAGE INSTRUCTION:
+You are viewing images of ALL pages of this document. Tables/sections often span MULTIPLE pages.
+- Scan EVERY page for continuations of data sections
+- A section that starts on page 1 may continue on pages 2, 3, 4, etc.
+- Look for consistent patterns/formatting across pages
+- Extract EVERY row from ALL pages - do not stop after the first page
+- Count total entries to verify completeness
+
+EXTRACT:
+- Names (individuals, companies, trusts)
+- Complete addresses
+- Phone/email if present
+- Ownership info (percentages, interest types)
+- Mineral rights ownership percentage (as decimal, e.g., 25.5 for 25.5%)
+
+PRIORITY SOURCES - Visual Patterns to Find:
+
+1. **MAILING/DELIVERY SECTIONS** (MOST CRITICAL - Contains certified mail recipients)
+   
+   VISUAL IDENTIFICATION - Look for ANY of these patterns:
+   a) **Postal Delivery Report format:**
+      - Header: "Postal Delivery Report"
+      - Leftmost column: USPS tracking numbers (9414..., 9407..., 9208...)
+      - Columns: Tracking# | Name | Address | City | State | Zip | Delivery Status
+      - Multiple rows with same pattern
+      - Spans multiple pages
+   
+   b) **Mail Activity Report - CertifiedPro.net format:**
+      - Header: "Mail Activity Report - CertifiedPro.net" OR "CertifiedPro.net"
+      - May or may not have tracking numbers
+      - Columns: Tracking# | Name | Address | City | State | Zip | Status
+      - Often appears later in document
+      - Spans multiple pages
+   
+   c) **Transaction Report/Details format:**
+      - Header: "Transaction Report" or "Transaction Details"
+      - Has mailing/delivery confirmation data
+      - Columns similar to above
+      - May NOT have tracking numbers
+   
+   ⚠️ CRITICAL RULES FOR THESE SECTIONS:
+   - These are the SAME recipients in different formats - extract from ALL
+   - Tables span 3-10+ pages - continue extracting until pattern ends
+   - Same column structure = continuation (headers may not repeat)
+   - Do NOT stop after first page - scan entire document
+   - IGNORE tracking numbers in extraction (only use to identify section)
+   - Combine: Address + City + State + Zip into single address
+   - Put delivery status in notes field
+
+2. **PARTIES TO POOL SECTIONS** (CRITICAL - Often missed)
+   
+   VISUAL IDENTIFICATION:
+   - Header: "PARTIES TO POOL" with "INTEREST TYPE" sub-header
+   - 2-column layout:
+     * Left column: Name and address (3-4 lines stacked vertically)
+       - Line 1: Name
+       - Line 2: Street address  
+       - Line 3: City, State Zip
+     * Right column: Interest type code (WI, UMI, ORRI)
+   - Pattern repeats down page
+   - Usually appears AFTER main ownership/recapitulation tables
+   
+   Example visual layout:
+   \`\`\`
+   PARTIES TO POOL          | INTEREST TYPE
+   ------------------------ | -------------
+   JEREMY YOUNG             |
+   2105 Kings Road          | UMI
+   Carrollton, TX 75007     |
+   ------------------------ | -------------
+   TETON RANGE OPERATING    |
+   970 W Broadway St E      | WI  
+   Jackson, WY 83002        |
+   \`\`\`
+   
+   ⚠️ Extract EVERY entry - these are pooled working interest owners
+
+3. **OWNERSHIP TABLES/RECAPITULATION**
+   
+   VISUAL IDENTIFICATION:
+   - Headers: "Unit Recapitulation", "Leasehold Ownership", "Summary of Interests"
+   - Multi-column format with: Owner Name | Address | Ownership % | Interest Type
+   - May have "Name 1" and "Name 2" columns (combine these)
+   - Extract name, address, ownership percentage, interest type
+
+4. **OTHER CONTACT SECTIONS**
+   - Interest owner tables (WI, ORRI, MI, UMI owners)
+   - Revenue/mailing lists
+   - Tract ownership breakdowns
+   - ANY section with repeated pattern of names + addresses
+
+SCANNING METHODOLOGY:
+For EACH page:
+1. Check header/title - does it mention: Postal, Mail, Delivery, CertifiedPro, Transaction, Parties, Owners?
+2. Look for tracking numbers (long number sequences) - indicates mailing section
+3. Look for column headers with: Name, Address, City, State, Zip
+4. Identify repeated patterns - same info structure repeating down
+5. If pattern exists, extract ALL rows on this page
+6. Check NEXT page - does same pattern continue? If yes, keep extracting
+7. Only stop when pattern changes or document ends
+
+SPECIAL FORMATS:
+
+**For Postal/Mailing sections (all formats):**
+- Identify by: tracking numbers OR header text containing mail/postal/delivery keywords
+- Extract: Name | Address | City | State | Zip | Delivery Status
+- Combine address fields: "Address, City, State Zip"
+- Put delivery status in notes: "Delivered", "Picked up", "In transit"
+- IGNORE tracking numbers (don't extract them)
+
+**For Parties to Pool sections:**
+- Identify by: "PARTIES TO POOL" header + 2-column layout
+- Name and address in LEFT column (multi-line)
+- Interest type in RIGHT column
+- Parse multi-line address into components
+- Extract interest type code
+
+**For tables with "Name 1" and "Name 2" columns:**
+- Combine Name 1 and Name 2 as single entity
+- If Name 2 is blank, use only Name 1
+- Example: Name 1="Bureau of Land Management", Name 2="Department of the Interior" → combine
+
+**For all formats:**
+- Combine Address1 and Address2 fields into complete address
+- Extract all rows regardless of "Mailing Status" column
+- For multi-line addresses, parse carefully
+
+EXCLUDE (skip entirely):
+- Attorneys, lawyers, law firms
+- Legal professionals (Esq., J.D., P.C., P.A., PLLC, LLP)
+- Legal services/representatives
+EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, not lawyers)
+
+JSON FORMAT:
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Complete address",
+  "phone": "Phone with type",
+  "email": "Email if present",
+  "ownership_info": "Percentages/fractions (keep for reference)",
+  "mineral_rights_percentage": "Ownership % as decimal (0-100), null if not specified",
+  "ownership_type": "WI, ORRI, or UMI only (null if other or unspecified)",
+  "tract_info": "Tract number(s) if tract-level data",
+  "unit_level": true/false,
+  "notes": "Additional details, delivery status, or address_unknown: true if no address",
+  "record_type": "individual/company/joint",
+  "document_section": "Source section (e.g., 'Postal Delivery Report', 'Mail Activity Report', 'Transaction Report', 'Parties to Pool', 'Unit Recapitulation')"
+}
+
+OWNERSHIP TYPE MAPPING:
+- WI = Working Interest
+- ORRI = Overriding Royalty Interest
+- UMI = Unleased Mineral Interest
+- Only use these three codes, set to null for any other type (including MI, Committed, Uncommitted)
+
+PERCENTAGE EXTRACTION:
+- Convert fractions to decimals (e.g., 1/4 = 25.0, 3/8 = 37.5)
+- Extract percentages as numbers (e.g., "25.5%" becomes 25.5)
+- If multiple percentages exist, use the primary/largest one
+- Set to null if no percentage information found
+
+Requirements:
+- Must have name/company AND (address OR be listed in Chronology of Contacts or recapitulation table)
+- If no address available, include party if they appear in:
+  * Postal Delivery Report sections (even if delivery failed)
+  * Mail Activity Report / CertifiedPro.net sections
+  * Parties to Pool sections
+  * Chronology of Contacts section (even with N/A address)
+  * Recapitulation/ownership tables with interest type
+  * Mark as "address_unknown": true in notes field
+- When uncertain if legal professional, exclude UNLESS from postal/interest/parties to pool section
+- No text outside JSON array
+
+⚠️ FINAL VERIFICATION - Before responding, verify you extracted from:
+
+MAILING SECTIONS (check ALL pages):
+□ Postal Delivery Report (with 9414/9407 tracking numbers)
+□ Mail Activity Report - CertifiedPro.net (may be later in document)
+□ Transaction Report / Transaction Details (with delivery info)
+Did you extract from ALL pages where these sections continue?
+
+PARTY/OWNER SECTIONS:
+□ Parties to Pool (2-column: name/address | interest type)
+□ Unit Recapitulation / Leasehold Ownership tables
+□ Interest owner tables
+
+VERIFICATION:
+- If you found < 20 contacts, you likely missed major sections
+- Check: Did mailing sections continue for multiple pages?
+- Check: Did you find the 2-column "Parties to Pool" section?
+- Check: Did you scan the ENTIRE document from first to last page?
+
+EXAMPLES:
+
+Example 1 - Postal Delivery Report:
+9414811898765448760725 | AmericaWest Resources, LLC | PO Box 3383 | Midland | TX | 79702 | Delivered June 13, 2025
+
+EXTRACT AS:
+{
+  "company": "AmericaWest Resources, LLC",
+  "name": null,
+  "first_name": null,
+  "last_name": null,
+  "address": "PO Box 3383, Midland, TX 79702",
+  "phone": null,
+  "email": null,
+  "ownership_info": null,
+  "mineral_rights_percentage": null,
+  "ownership_type": null,
+  "tract_info": null,
+  "unit_level": false,
+  "notes": "Delivered June 13, 2025",
+  "record_type": "company",
+  "document_section": "Postal Delivery Report"
+}
+
+Example 2 - Mail Activity Report - CertifiedPro.net:
+9407811898765404665521 | Jeremy Young | 2105 Kings Rd | Carrollton | TX | 75007-3227 | Your item was delivered
+
+EXTRACT AS:
+{
+  "company": null,
+  "name": "Jeremy Young",
+  "first_name": "Jeremy",
+  "last_name": "Young",
+  "address": "2105 Kings Rd, Carrollton, TX 75007-3227",
+  "phone": null,
+  "email": null,
+  "ownership_info": null,
+  "mineral_rights_percentage": null,
+  "ownership_type": null,
+  "tract_info": null,
+  "unit_level": false,
+  "notes": "Your item was delivered",
+  "record_type": "individual",
+  "document_section": "Mail Activity Report - CertifiedPro.net"
+}
+
+Example 3 - Parties to Pool (2-column format):
+PARTIES TO POOL          | INTEREST TYPE
+JEREMY YOUNG             |
+2105 Kings Road          | UMI
+Carrollton, TX 75007     |
+
+EXTRACT AS:
+{
+  "company": null,
+  "name": "Jeremy Young",
+  "first_name": "Jeremy",
+  "last_name": "Young",
+  "address": "2105 Kings Road, Carrollton, TX 75007",
+  "phone": null,
+  "email": null,
+  "ownership_info": null,
+  "mineral_rights_percentage": null,
+  "ownership_type": "UMI",
+  "tract_info": null,
+  "unit_level": false,
+  "notes": null,
+  "record_type": "individual",
+  "document_section": "Parties to Pool"
+}
+
+Example 4 - Parties to Pool Company:
+TETON RANGE OPERATING, LLC
+970 W Broadway Street E
+Jackson, WY 83002 | WI
+
+EXTRACT AS:
+{
+  "company": "Teton Range Operating, LLC",
+  "name": null,
+  "first_name": null,
+  "last_name": null,
+  "address": "970 W Broadway Street E, Jackson, WY 83002",
+  "phone": null,
+  "email": null,
+  "ownership_info": null,
+  "mineral_rights_percentage": null,
+  "ownership_type": "WI",
+  "tract_info": null,
+  "unit_level": false,
+  "notes": null,
+  "record_type": "company",
+  "document_section": "Parties to Pool"
+}
+
+Example 5 - Transaction Details:
+Bureau of Land Management | 620 E. GREENE ST | CARLSBAD | NM | 88220 | Delivered 04/16/2024 1:57 PM
+
+EXTRACT AS:
+{
+  "company": "Bureau of Land Management",
+  "name": null,
+  "first_name": null,
+  "last_name": null,
+  "address": "620 E. GREENE ST, CARLSBAD, NM 88220",
+  "phone": null,
+  "email": null,
+  "ownership_info": null,
+  "mineral_rights_percentage": null,
+  "ownership_type": null,
+  "tract_info": null,
+  "unit_level": false,
+  "notes": "Delivered 04/16/2024 1:57 PM",
+  "record_type": "company",
+  "document_section": "Transaction Details"
+}
+
+Text content:
+\${TEXT_CONTENT}`,
+
+    text: `Extract contact information from the following extracted text content. Return ONLY a JSON array, no other text.
+
+EXTRACT:
+- Names (individuals, companies, trusts)
+- Complete addresses
+- Phone/email if present
+- Ownership info (percentages, interest types)
+- Mineral rights ownership percentage (as decimal, e.g., 25.5 for 25.5%)
+
+PRIORITY SOURCES (extract ALL):
+- Postal Delivery Reports/Tables (MOST CRITICAL - contains certified mail recipients)
+- Transaction reports, CertifiedPro.net reports
+- Interest owner tables (WI, ORRI, MI, UMI owners)
+- Revenue/mailing lists
+- Tract ownership breakdowns
+- Unit-level ownership summaries
+
+EXCLUDE (skip entirely):
+- Attorneys, lawyers, law firms, legal professionals
+- EXCEPTION: Include trusts/trustees from postal/interest tables (they're owners, not lawyers)
+
+JSON FORMAT (return array of objects):
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Complete address",
+  "phone": "Phone with type",
+  "email": "Email if present",
+  "ownership_info": "Percentages/fractions",
+  "mineral_rights_percentage": "Ownership % as decimal (0-100), null if not specified",
+  "ownership_type": "WI, ORRI, or UMI only (null if other)",
+  "tract_info": "Tract number(s) if tract-level data",
+  "unit_level": true/false,
+  "notes": "Additional details or address_unknown: true if no address",
+  "record_type": "individual/company/joint",
+  "document_section": "Source table/section"
+}
+
+Requirements:
+- Return ONLY the JSON array, no explanatory text
+- Must have name/company AND address (or mark address_unknown: true)
+- No text outside JSON array
+
+Text content:
+\${TEXT_CONTENT}`
+  },
+
+  'oil-gas-contacts-old': {
+    native: `Extract contact information from this oil & gas document. Return JSON array only.
+
+⚠️ CRITICAL MULTI-PAGE INSTRUCTION:
 You are viewing ALL pages of this document at once. Tables often span MULTIPLE pages.
 - Scan EVERY page for table continuations
 - A table that starts on page 1 may continue on pages 2, 3, 4, etc.

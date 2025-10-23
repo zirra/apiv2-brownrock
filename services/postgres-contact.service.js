@@ -273,16 +273,16 @@ class PostgresContactService {
 
       console.log(`💾 Bulk inserting ${postgresContacts.length} valid contacts into PostgreSQL...`);
 
-      // Remove duplicates before insertion based on name/company + phone/email
-      const uniqueContacts = this.removeDuplicates(postgresContacts);
-      console.log(`💾 Inserting ${uniqueContacts.length} unique contacts (${postgresContacts.length - uniqueContacts.length} duplicates removed)...`);
+      // Skip client-side duplicate removal - let database handle duplicates via ignoreDuplicates flag
+      // This allows all contacts to be inserted, even if they appear similar
+      console.log(`💾 Inserting ${postgresContacts.length} contacts (duplicate removal skipped)...`);
 
       // Log a sample contact for debugging
-      if (uniqueContacts.length > 0) {
-        console.log('📋 Sample contact data:', JSON.stringify(uniqueContacts[0], null, 2));
+      if (postgresContacts.length > 0) {
+        console.log('📋 Sample contact data:', JSON.stringify(postgresContacts[0], null, 2));
       }
 
-      const result = await this.Contact.bulkCreate(uniqueContacts, {
+      const result = await this.Contact.bulkCreate(postgresContacts, {
         ignoreDuplicates: true,
         returning: true,
         validate: true
@@ -290,16 +290,16 @@ class PostgresContactService {
 
       console.log(`✅ Successfully inserted ${result.length} contacts into PostgreSQL`);
 
-      if (result.length === 0 && uniqueContacts.length > 0) {
-        console.warn(`⚠️ Warning: ${uniqueContacts.length} contacts were processed but 0 were inserted - possible duplicates or validation issues`);
+      if (result.length === 0 && postgresContacts.length > 0) {
+        console.warn(`⚠️ Warning: ${postgresContacts.length} contacts were processed but 0 were inserted - possible database duplicates or validation issues`);
       }
 
       return {
-        success: result.length > 0 || uniqueContacts.length === 0,
+        success: result.length > 0 || postgresContacts.length === 0,
         insertedCount: result.length,
         skippedCount: postgresContacts.length - result.length,
-        processedCount: uniqueContacts.length,
-        message: `Inserted ${result.length}/${postgresContacts.length} contacts (${uniqueContacts.length} unique processed)`
+        processedCount: postgresContacts.length,
+        message: `Inserted ${result.length}/${postgresContacts.length} contacts`
       };
 
     } catch (error) {
@@ -786,6 +786,112 @@ class PostgresContactService {
       return {
         success: false,
         error: error.message
+      };
+    }
+  }
+
+  /**
+   * Delete a single contact by ID
+   * @param {number} id - Contact ID to delete
+   * @returns {Object} - Result object with success status
+   */
+  async deleteContact(id) {
+    try {
+      const contact = await this.Contact.findByPk(id);
+
+      if (!contact) {
+        console.warn(`⚠️ Contact with ID ${id} not found`);
+        return {
+          success: false,
+          message: `Contact with ID ${id} not found`
+        };
+      }
+
+      // Store contact info for logging
+      const contactInfo = {
+        id: contact.id,
+        name: contact.name,
+        company: contact.llc_owner,
+        source_file: contact.source_file
+      };
+
+      await contact.destroy();
+
+      console.log(`✅ Deleted contact ID ${id}: ${contactInfo.name || contactInfo.company || 'Unknown'}`);
+
+      return {
+        success: true,
+        message: `Contact deleted successfully`,
+        deletedContact: contactInfo
+      };
+
+    } catch (error) {
+      console.error(`❌ Failed to delete contact ID ${id}:`, error.message);
+      return {
+        success: false,
+        message: `Delete failed: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * Bulk delete multiple contacts by IDs
+   * @param {Array<number>} ids - Array of contact IDs to delete
+   * @returns {Object} - Result object with success status and count
+   */
+  async bulkDeleteContacts(ids) {
+    try {
+      if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return {
+          success: false,
+          message: 'No contact IDs provided'
+        };
+      }
+
+      console.log(`🗑️ Bulk deleting ${ids.length} contacts...`);
+
+      // Find contacts to be deleted (for logging)
+      const contactsToDelete = await this.Contact.findAll({
+        where: {
+          id: {
+            [this.sequelize.Sequelize.Op.in]: ids
+          }
+        },
+        attributes: ['id', 'name', 'llc_owner', 'source_file']
+      });
+
+      const deletedCount = await this.Contact.destroy({
+        where: {
+          id: {
+            [this.sequelize.Sequelize.Op.in]: ids
+          }
+        }
+      });
+
+      console.log(`✅ Deleted ${deletedCount} out of ${ids.length} requested contacts`);
+
+      if (deletedCount !== ids.length) {
+        console.warn(`⚠️ Some contacts were not found: requested ${ids.length}, deleted ${deletedCount}`);
+      }
+
+      return {
+        success: true,
+        message: `Deleted ${deletedCount} contact(s)`,
+        deletedCount,
+        requestedCount: ids.length,
+        notFoundCount: ids.length - deletedCount,
+        deletedContacts: contactsToDelete.map(c => ({
+          id: c.id,
+          name: c.name,
+          company: c.llc_owner
+        }))
+      };
+
+    } catch (error) {
+      console.error(`❌ Bulk delete failed:`, error.message);
+      return {
+        success: false,
+        message: `Bulk delete failed: ${error.message}`
       };
     }
   }

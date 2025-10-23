@@ -500,6 +500,74 @@ class ContactController {
       })
     }
   }
+
+  async deletePostgresContact(req, res) {
+    try {
+      // Check if service exists
+      if (!this.postgresContactService) {
+        return res.status(500).json({
+          success: false,
+          message: 'PostgresContactService not initialized'
+        })
+      }
+
+      const { id } = req.params
+
+      if (!id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Contact ID is required'
+        })
+      }
+
+      console.log(`🗑️ Delete request received for contact ID: ${id}`)
+
+      const result = await this.postgresContactService.deleteContact(id)
+
+      res.status(result.success ? 200 : 404).json(result)
+
+    } catch (error) {
+      console.error('Error deleting contact:', error.message)
+      res.status(500).json({
+        success: false,
+        message: `Delete failed: ${error.message}`
+      })
+    }
+  }
+
+  async bulkDeletePostgresContacts(req, res) {
+    try {
+      // Check if service exists
+      if (!this.postgresContactService) {
+        return res.status(500).json({
+          success: false,
+          message: 'PostgresContactService not initialized'
+        })
+      }
+
+      const { ids } = req.body
+
+      if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Array of contact IDs is required'
+        })
+      }
+
+      console.log(`🗑️ Bulk delete request received for ${ids.length} contacts`)
+
+      const result = await this.postgresContactService.bulkDeleteContacts(ids)
+
+      res.status(result.success ? 200 : 500).json(result)
+
+    } catch (error) {
+      console.error('Error bulk deleting contacts:', error.message)
+      res.status(500).json({
+        success: false,
+        message: `Bulk delete failed: ${error.message}`
+      })
+    }
+  }
 }
 
 // Create single instance
@@ -521,6 +589,8 @@ module.exports.controller = (app) => {
   app.get('/v1/postgres/contacts/export', (req, res) => contactController.exportPostgresContactsCSV(req, res))
   app.put('/v1/postgres/contacts/update', (req, res) => contactController.updatePostgresContactStatus(req, res))
   app.post('/v1/postgres/contacts/deduplicate', (req, res) => contactController.deduplicatePostgresContacts(req, res))
+  app.delete('/v1/postgres/contacts/:id', (req, res) => contactController.deletePostgresContact(req, res))
+  app.post('/v1/postgres/contacts/bulk-delete', (req, res) => contactController.bulkDeletePostgresContacts(req, res))
 
   // Debug endpoints
   app.get('/v1/test-dynamo', (req, res) => contactController.testDynamoClient(req, res))
