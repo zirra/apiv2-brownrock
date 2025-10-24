@@ -19,11 +19,11 @@ module.exports = {
 
 ⚠️ CRITICAL MULTI-PAGE INSTRUCTION:
 You are viewing images of ALL pages of this document. Tables/sections often span MULTIPLE pages.
-- Scan EVERY page for continuations of data sections
-- A section that starts on page 1 may continue on pages 2, 3, 4, etc.
-- Look for consistent patterns/formatting across pages
-- Extract EVERY row from ALL pages - do not stop after the first page
-- Count total entries to verify completeness
+- Scan EVERY page independently for data sections
+- Tables can START on ANY page and CONTINUE across multiple subsequent pages
+- Look for consistent patterns/formatting across ALL pages
+- Extract EVERY row from EVERY page - do not stop after finding one section
+- Verify completeness by counting total entries across ALL pages
 
 EXTRACT:
 - Names (individuals, companies, trusts)
@@ -38,16 +38,17 @@ PRIORITY SOURCES - Visual Patterns to Find:
    
    VISUAL IDENTIFICATION - Look for ANY of these patterns:
    a) **Postal Delivery Report format:**
-      - Header: "Postal Delivery Report"
-      - Leftmost column: USPS tracking numbers (9414..., 9407..., 9208...)
+      - Header: "Postal Delivery Report", "Mailing", "Certified Mail"
+      - Any column: USPS tracking numbers (9414..., 9407..., 9208...)
       - Columns: Tracking# | Name | Address | City | State | Zip | Delivery Status
       - Multiple rows with same pattern
       - Spans multiple pages
    
    b) **Mail Activity Report - CertifiedPro.net format:**
-      - Header: "Mail Activity Report - CertifiedPro.net" OR "CertifiedPro.net"
+      - Header: "Mail Activity Report - CertifiedPro.net" OR "CertifiedPro.net", "Mailing", "Certified Mail"
       - May or may not have tracking numbers
       - Columns: Tracking# | Name | Address | City | State | Zip | Status
+      - Any column: USPS tracking numbers (9414..., 9407..., 9208...)
       - Often appears later in document
       - Spans multiple pages
    
