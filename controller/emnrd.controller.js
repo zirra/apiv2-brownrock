@@ -545,7 +545,8 @@ class EmnrdController {
                     ...c,
                     source_file: pdf.FileName,
                     record_type: applicant,
-                    extraction_method: 'claude-native-pdf-fallback'
+                    extraction_method: 'claude-native-pdf-fallback',
+                    project_origin: 'OCD_IMAGING'
                   }))
 
                   // Save to PostgreSQL
@@ -674,7 +675,8 @@ class EmnrdController {
                 ...c,
                 source_file: pdf.FileName,
                 record_type: applicant,
-                extraction_method: 'ghostscript-claude-vision'
+                extraction_method: 'ghostscript-claude-vision',
+                project_origin: 'OCD_IMAGING'
               }))
 
               // Save to PostgreSQL
@@ -935,7 +937,8 @@ class EmnrdController {
       const enrichedContacts = contacts.map(c => ({
         ...c,
         source_file: originalName,
-        record_type: applicantName
+        record_type: applicantName,
+        project_origin: 'OCD_IMAGING'
       }))
 
       // Save to PostgreSQL
@@ -1051,7 +1054,8 @@ class EmnrdController {
       const enrichedContacts = contacts.map(c => ({
         ...c,
         source_file: originalName,
-        record_type: applicantName
+        record_type: applicantName,
+        project_origin: 'OCD_IMAGING'
       }))
 
       // Save to PostgreSQL

@@ -635,6 +635,135 @@ Text content:
   },
 
   /**
+   * OCD CBT Contact Extraction
+   * For extracting contact information from OCD CBT county-based documents
+   *
+   * CUSTOMIZATION INSTRUCTIONS:
+   * To customize this prompt for your specific document structure:
+   * 1. Update the 'native' prompt below with your requirements
+   * 2. Update the 'text' prompt if needed
+   * 3. Keep the JSON format consistent with the existing structure
+   * 4. Test with sample documents to refine
+   */
+  'ocd-cbt-contacts': {
+    native: `⚠️ CRITICAL INSTRUCTIONS:
+You are extracting ONLY contact/distribution information from mailing lists, distribution lists, or contact tables.
+
+SCOPE:
+- Scan ALL pages independently
+- Tables can appear on ANY page
+- Look for MULTIPLE tables/sections across all pages
+- Extract EVERY entry from EVERY relevant table
+
+TARGET PATTERNS (High Priority):
+Look for sections with these headers/titles:
+- "Mailing List" / "Distribution List" / "Address List"
+- "Interested Parties" / "Parties Notified"
+- "Recipients" / "Addressees"
+- Any table with columns like: Name, Address, City, State, Zip
+- Certified mail receipts / Postal reports
+- Tables with date sent/received fields
+
+EXTRACT THESE FIELDS:
+- Company/Business name (if present)
+- Individual name (full name or first/last separately)
+- Complete mailing address
+- City, State, ZIP code
+- Phone numbers (with type if indicated)
+- Email addresses
+- Dates (if present - sent date, received date, etc.)
+- Certified mail tracking numbers (if present)
+- Any ownership/interest percentages or descriptions
+
+EXCLUDE:
+- Attorneys, law firms, legal representatives (unless they appear in a primary mailing list as recipients)
+- Headers, footers, page numbers
+- Form instructions or explanatory text
+
+JSON FORMAT:
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Complete street address",
+  "city": "City name",
+  "state": "State abbreviation",
+  "zip": "ZIP code",
+  "phone": "Phone number with type if indicated",
+  "email": "Email address if present",
+  "date_sent": "Date if present in table",
+  "certified_number": "Tracking number if present",
+  "notes": "Additional relevant details",
+  "record_type": "individual/company/joint",
+  "document_section": "Section name from document (e.g., 'Interested Parties List', 'Mailing List')",
+  "page_number": "Page number where found"
+}
+
+REQUIREMENTS:
+- Return ONLY a JSON array of objects
+- Include ALL entries from ALL qualifying tables across ALL pages
+- If address is not available but party appears in a contact list, include with notes: "address_unknown: true"
+- No explanatory text outside the JSON array
+
+VERIFICATION CHECKLIST:
+□ Scanned every page from first to last
+□ Extracted from ALL contact/distribution tables found
+□ Counted all entries to ensure completeness
+□ Checked for multiple sections across different pages
+
+Text content:
+\${TEXT_CONTENT}`,
+
+    text: `Extract contact information from the following OCD CBT document text content. Return ONLY a JSON array, no other text.
+
+EXTRACT:
+- Names (individuals, companies, trusts)
+- Complete addresses
+- Phone/email if present
+- Any ownership or interest information
+- Permit/application numbers if present
+
+PRIORITY SOURCES (extract ALL):
+[CUSTOMIZE: List the specific sections that appear in text-extracted OCD CBT documents]
+- Primary contact sections
+- Mailing lists
+- Applicant/party lists
+- Any section with repeated name + address patterns
+
+EXCLUDE (skip entirely):
+- Attorneys, lawyers, law firms, legal professionals
+- EXCEPTION: Include trusts/trustees from contact tables (they may be parties)
+
+JSON FORMAT (return array of objects):
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Complete address",
+  "phone": "Phone with type",
+  "email": "Email if present",
+  "ownership_info": "Percentages/fractions if present",
+  "mineral_rights_percentage": "Ownership % as decimal (0-100), null if not specified",
+  "ownership_type": "Interest type if specified",
+  "tract_info": "Tract/section number(s) if present",
+  "unit_level": true/false,
+  "notes": "Additional details or address_unknown: true if no address",
+  "record_type": "individual/company/joint",
+  "document_section": "Source table/section"
+}
+
+Requirements:
+- Return ONLY the JSON array, no explanatory text
+- Must have name/company AND address (or mark address_unknown: true)
+- No text outside JSON array
+
+Text content:
+\${TEXT_CONTENT}`
+  },
+
+  /**
    * Lease Agreement Extraction
    * For extracting lease terms and parties from lease agreements
    */
