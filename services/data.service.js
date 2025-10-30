@@ -65,6 +65,7 @@ class DataService {
 
     let url =`OCD/Imaging/AdministrativeOrder/Files/Search/25/1?CountyName=${countyName}&ScanDate=${month}%2F${day}%2F${year}&ScanDateFilterExpression=GreaterThan`
 
+    console.log(`URL being called: ${url} <----------`)
     /*
     let url = `OCD/Imaging/Case/Files/Search/25/1?County=${countyName}&CountyFilterExpression=Contains&ScanDate=${month}%2F${day}%2F${year}&ScanDateFilterExpression=GreaterThan`
     */
