@@ -63,7 +63,7 @@ class DataService {
     // Use the current year
     const year = now.getFullYear();
 
-    let url =`OCD/Imaging/AdministrativeOrder/Files/Search/25/1?CountyName=${countyName}&ScanDate=${month}%2F${day}%2F${year}&ScanDateFilterExpression=GreaterThan`
+    let url =`OCD/Imaging/AdministrativeOrder/Files/Search/25/1?CountyName=${countyName}&ScanDate=${month}%2F${day}%2F${year}&ScanDateFilterExpression=GreaterThan&ApplicationCategoryId=CTB`
 
     console.log(`URL being called: ${url} <----------`)
     /*
