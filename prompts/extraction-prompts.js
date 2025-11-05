@@ -680,35 +680,70 @@ EXCLUDE:
 - Headers, footers, page numbers
 - Form instructions or explanatory text
 
+⚠️ ADDRESS PARSING RULES:
+CRITICAL: Always split addresses into separate components, even if they appear on one line.
+
+Examples:
+Input: "123 Main St, Austin, TX 78701"
+Output: 
+  - address: "123 Main St"
+  - city: "Austin"
+  - state: "TX"
+  - zip: "78701"
+
+Input: "PO Box 1234, Santa Fe, NM 87505"
+Output:
+  - address: "PO Box 1234"
+  - city: "Santa Fe"
+  - state: "NM"
+  - zip: "87505"
+
+Input: "456 Oak Avenue Suite 200, Denver, Colorado 80202"
+Output:
+  - address: "456 Oak Avenue Suite 200"
+  - city: "Denver"
+  - state: "CO"
+  - zip: "80202"
+
+PARSING REQUIREMENTS:
+- ALWAYS separate street address from city/state/zip
+- Extract 2-letter state codes (convert full state names to abbreviations)
+- ZIP codes can be 5 digits or 9 digits (12345 or 12345-6789)
+- Street address includes house number, street name, unit/suite/apt numbers
+- If address spans multiple lines, combine street components but keep city/state/zip separate
+
 JSON FORMAT:
 {
   "company": "Business name or null",
   "name": "Full name or null",
   "first_name": "First name if separable",
   "last_name": "Last name if separable",
-  "address": "Complete street address",
-  "city": "City name",
-  "state": "State abbreviation",
-  "zip": "ZIP code",
+  "address": "Street address ONLY (no city/state/zip)",
+  "city": "City name only",
+  "state": "Two-letter state code",
+  "zip": "ZIP code only (5 or 9 digit)",
   "phone": "Phone number with type if indicated",
   "email": "Email address if present",
   "date_sent": "Date if present in table",
   "certified_number": "Tracking number if present",
   "notes": "Additional relevant details",
   "record_type": "individual/company/joint",
-  "document_section": "Section name from document (e.g., 'Interested Parties List', 'Mailing List')",
+  "document_section": "Section name from document",
   "page_number": "Page number where found"
 }
 
 REQUIREMENTS:
 - Return ONLY a JSON array of objects
 - Include ALL entries from ALL qualifying tables across ALL pages
+- MUST parse addresses into separate fields (address, city, state, zip)
+- If address cannot be parsed, set fields individually to null but include what you can extract
 - If address is not available but party appears in a contact list, include with notes: "address_unknown: true"
 - No explanatory text outside the JSON array
 
 VERIFICATION CHECKLIST:
 □ Scanned every page from first to last
 □ Extracted from ALL contact/distribution tables found
+□ Parsed ALL addresses into separate components (address, city, state, zip)
 □ Counted all entries to ensure completeness
 □ Checked for multiple sections across different pages
 
