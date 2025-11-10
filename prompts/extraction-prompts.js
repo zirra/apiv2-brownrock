@@ -680,37 +680,68 @@ EXCLUDE:
 - Headers, footers, page numbers
 - Form instructions or explanatory text
 
-⚠️ ADDRESS PARSING RULES:
-CRITICAL: Always split addresses into separate components, even if they appear on one line.
+⚠️ CRITICAL: TABULAR DATA PARSING RULES
 
-Examples:
-Input: "123 Main St, Austin, TX 78701"
-Output: 
-  - address: "123 Main St"
-  - city: "Austin"
+The documents contain tables with columns: Name | Address | City | State | Zip Code | Receipt No.
+
+PARSE EACH COLUMN CORRECTLY:
+1. **Name Column** - Company or individual name → extract as "company" or "name"
+2. **Address Column** - FULL street address INCLUDING suite/unit numbers → extract as "address"
+   - May contain: "5 Greenway Plaza, Suite 110" (this is ALL address)
+   - May contain: "8111 Westchester Drive, Suite 900" (this is ALL address)
+   - DO NOT split suite/unit from address
+   - DO NOT treat "Suite 110" as a city
+3. **City Column** - This is the ACTUAL city → extract as "city"
+4. **State Column** - 2-letter state code → extract as "state"
+5. **Zip Code Column** - 5 or 9-digit ZIP → extract as "zip"
+6. **Receipt Number Column** - Ignore (tracking numbers like 7020 1810 0000 1415 XXXX)
+
+⚠️ COMMON MISTAKE TO AVOID:
+WRONG: Seeing "Suite 110" in address column and thinking it's the city
+RIGHT: Address column can contain multi-part addresses - extract the ENTIRE address field as-is
+
+Examples of CORRECT parsing:
+
+Table Row: "XTO HOLDINGS, LLC | 22777 Springwoods Village Pkwy | Spring | TX | 77389"
+Output:
+  - company: "XTO HOLDINGS, LLC"
+  - address: "22777 Springwoods Village Pkwy"
+  - city: "Spring"
   - state: "TX"
-  - zip: "78701"
+  - zip: "77389"
 
-Input: "PO Box 1234, Santa Fe, NM 87505"
+Table Row: "WPX INC | 5 Greenway Plaza, Suite 110 | Houston | TX | 77046"
 Output:
-  - address: "PO Box 1234"
-  - city: "Santa Fe"
-  - state: "NM"
-  - zip: "87505"
+  - company: "WPX INC"
+  - address: "5 Greenway Plaza, Suite 110"
+  - city: "Houston"
+  - state: "TX"
+  - zip: "77046"
 
-Input: "456 Oak Avenue Suite 200, Denver, Colorado 80202"
+Table Row: "TD MINERALS LLC | 8111 Westchester Drive, Suite 900 | Dallas | TX | 75225"
 Output:
-  - address: "456 Oak Avenue Suite 200"
-  - city: "Denver"
-  - state: "CO"
-  - zip: "80202"
+  - company: "TD MINERALS LLC"
+  - address: "8111 Westchester Drive, Suite 900"
+  - city: "Dallas"
+  - state: "TX"
+  - zip: "75225"
+
+Table Row: "SMP SIDECAR TITAN MINERAL HOLDINGS, LP | 4143 MAPLE AVE, STE 500 | DALLAS | TX | 75219"
+Output:
+  - company: "SMP SIDECAR TITAN MINERAL HOLDINGS, LP"
+  - address: "4143 MAPLE AVE, STE 500"
+  - city: "DALLAS"
+  - state: "TX"
+  - zip: "75219"
 
 PARSING REQUIREMENTS:
-- ALWAYS separate street address from city/state/zip
-- Extract 2-letter state codes (convert full state names to abbreviations)
-- ZIP codes can be 5 digits or 9 digits (12345 or 12345-6789)
-- Street address includes house number, street name, unit/suite/apt numbers
-- If address spans multiple lines, combine street components but keep city/state/zip separate
+- Read tables LEFT to RIGHT by column position
+- Address column = complete street address (may include suite/unit)
+- City column = actual city (NEVER extract city from address column)
+- If you see "Suite", "STE", "Unit", "#" in address column → it's part of the address
+- Combine address parts WITH suite/unit numbers before the city column
+- Extract 2-letter state codes as-is
+- ZIP codes: 5 digits or 9 digits (12345 or 12345-6789)
 
 JSON FORMAT:
 {

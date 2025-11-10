@@ -44,8 +44,9 @@ class PostgresContactService {
     // Final name to store (prefer full name, fall back to constructed name)
     const finalName = fullName || `${firstName} ${lastName}`.trim() || claudeContact.company || null;
 
-    // Parse address components
-    const { street, city, state, zip, unit } = this.parseAddress(claudeContact.address || '');
+    // Parse address components only if Claude didn't provide separate fields
+    // Prefer Claude's separate fields (city, state, zip) over parsed values
+    const parsed = this.parseAddress(claudeContact.address || '');
 
     return {
       name: finalName,
@@ -60,11 +61,11 @@ class PostgresContactService {
       phone8: phones[7] || null,
       email1: emails[0] || null,
       email2: emails[1] || null,
-      address: street || claudeContact.address || null,
-      city: city || null,
-      state: state || null,
-      zip: zip || null,
-      unit: unit || null,
+      address: claudeContact.address || parsed.street || null,
+      city: claudeContact.city || parsed.city || null,
+      state: claudeContact.state || parsed.state || null,
+      zip: claudeContact.zip || parsed.zip || null,
+      unit: claudeContact.unit || parsed.unit || null,
       first_name: firstName || null,
       last_name: lastName || null,
       notes: claudeContact.notes || null,
