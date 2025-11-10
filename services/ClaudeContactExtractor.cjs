@@ -55,6 +55,14 @@ class ClaudeContactExtractor {
       PROJECT_ORIGIN: process.env.DEFAULT_PROJECT_ORIGIN || 'OCD_IMAGING'
     }
 
+    // Claude API configuration
+    this.claudeConfig = {
+      model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
+      temperature: parseFloat(process.env.CLAUDE_TEMPERATURE) || 0.0,
+      maxTokens: parseInt(process.env.CLAUDE_MAX_TOKENS) || 8000,
+      maxTokensVision: parseInt(process.env.CLAUDE_MAX_TOKENS_VISION) || 16000
+    }
+
     // Initialize PostgreSQL service
     if (this.processingConfig.usePostgres) {
       this.postgresService = new PostgresContactService()
@@ -1007,8 +1015,9 @@ class ClaudeContactExtractor {
 
           try {
             const response = await this.anthropic.messages.create({
-              model: "claude-sonnet-4-20250514",
-              max_tokens: 8000,
+              model: this.claudeConfig.model,
+              max_tokens: this.claudeConfig.maxTokens,
+              temperature: this.claudeConfig.temperature,
               messages: [{
                 role: "user",
                 content: [
@@ -1061,8 +1070,9 @@ class ClaudeContactExtractor {
         const prompt = this.getPrompt('native') + tableSummary
 
         const response = await this.anthropic.messages.create({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 8000,
+          model: this.claudeConfig.model,
+          max_tokens: this.claudeConfig.maxTokens,
+          temperature: this.claudeConfig.temperature,
           messages: [{
             role: "user",
             content: [
@@ -1141,8 +1151,9 @@ class ClaudeContactExtractor {
       this.logger.info(`📄 PDF size: ${(pdfBuffer.length / 1024).toFixed(1)} KB`)
 
       const response = await this.anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 8000,
+        model: this.claudeConfig.model,
+        max_tokens: this.claudeConfig.maxTokens,
+        temperature: this.claudeConfig.temperature,
         messages: [{
           role: "user",
           content: [
@@ -1224,8 +1235,9 @@ class ClaudeContactExtractor {
 
         try {
           const retryResponse = await this.anthropic.messages.create({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 8000,
+            model: this.claudeConfig.model,
+            max_tokens: this.claudeConfig.maxTokens,
+            temperature: this.claudeConfig.temperature,
             messages: [{
               role: "user",
               content: [
@@ -1385,8 +1397,9 @@ class ClaudeContactExtractor {
       })
 
       const response = await this.anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 16000, // Increased from 8000 to handle large multi-page tables
+        model: this.claudeConfig.model,
+        max_tokens: this.claudeConfig.maxTokensVision, // Increased from 8000 to handle large multi-page tables
+        temperature: this.claudeConfig.temperature,
         messages: [{
           role: "user",
           content: content
@@ -1470,8 +1483,9 @@ class ClaudeContactExtractor {
           })
 
           const retryResponse = await this.anthropic.messages.create({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 8000,
+            model: this.claudeConfig.model,
+            max_tokens: this.claudeConfig.maxTokensVision,
+            temperature: this.claudeConfig.temperature,
             messages: [{
               role: "user",
               content: content
@@ -1506,8 +1520,9 @@ class ClaudeContactExtractor {
       this.logger.info(`🚀 Calling Claude API (attempt ${retryCount + 1}) with ${textContent.length.toLocaleString()} characters...`)
 
       const response = await this.anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 8000,  // Increased for larger contact lists
+        model: this.claudeConfig.model,
+        max_tokens: this.claudeConfig.maxTokens,
+        temperature: this.claudeConfig.temperature,
         messages: [{
           role: "user",
           content: prompt
@@ -1595,8 +1610,9 @@ class ClaudeContactExtractor {
 
         try {
           const retryResponse = await this.anthropic.messages.create({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 8000,  // Increased for larger contact lists
+            model: this.claudeConfig.model,
+            max_tokens: this.claudeConfig.maxTokens,
+            temperature: this.claudeConfig.temperature,
             messages: [{
               role: "user",
               content: prompt
