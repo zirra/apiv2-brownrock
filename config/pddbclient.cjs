@@ -22,7 +22,10 @@ const pgdbconnect = new Sequelize(
 )
 
 const Contact = require('../models/contact.js');
+const ContactReady = require ('../models/contact-ready.js');
+
 Contact.init(pgdbconnect);
+ContactReady.init(pgdbconnect);
 
 (async () => {
   try {
@@ -32,6 +35,7 @@ Contact.init(pgdbconnect);
     console.log('Database synced');
 
     // Debug: Check what attributes Sequelize knows about
+    console.log('ContactReady model attributes:', Object.keys(ContactReady.rawAttributes));
     console.log('Contact model attributes:', Object.keys(Contact.rawAttributes));
   } catch (err) {
     console.error('Database connection/sync error:', err);
@@ -41,5 +45,6 @@ Contact.init(pgdbconnect);
 module.exports = {
   pgdbconnect,
   Contact,
+  ContactReady,
   DataTypes
 }
