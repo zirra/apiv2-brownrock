@@ -99,6 +99,11 @@ class OcdCbtController {
   // Main vision processing workflow - processes PDFs from counties
   async processWithVision(req, res) {
     const { execSync } = require('child_process')
+    const jobIdService = require('../services/job-id.service')
+
+    // Generate unique job ID for this processing run
+    const jobId = jobIdService.generateJobId('OCD_CBT')
+    console.log(`🆔 Generated Job ID for this run: ${jobId}`)
 
     // Track processing metrics
     const metrics = {
@@ -108,7 +113,8 @@ class OcdCbtController {
       processingFailed: 0,
       successfullyProcessed: 0,
       totalContacts: 0,
-      skippedFiles: []
+      skippedFiles: [],
+      jobId
     }
 
     try {
@@ -332,7 +338,8 @@ class OcdCbtController {
                     source_file: pdf.FileName,
                     record_type: county,
                     extraction_method: 'claude-native-pdf-fallback',
-                    project_origin: 'OCD_CBT'
+                    project_origin: 'OCD_CBT',
+                    jobid: jobId
                   }))
 
                   // Save to PostgreSQL
@@ -463,7 +470,8 @@ class OcdCbtController {
                 source_file: pdf.FileName,
                 record_type: county,
                 extraction_method: 'ghostscript-claude-vision',
-                project_origin: 'OCD_CBT'
+                project_origin: 'OCD_CBT',
+                jobid: jobId
               }))
 
               // Save to PostgreSQL
@@ -637,6 +645,7 @@ class OcdCbtController {
    */
   async uploadAndProcessWithClaudeVision(req, res) {
     const { execSync } = require('child_process')
+    const jobIdService = require('../services/job-id.service')
     let uploadedFilePath = null
     let outputDir = null
     let resizedPdfPath = null
@@ -653,6 +662,10 @@ class OcdCbtController {
       uploadedFilePath = req.file.path
       const originalName = req.file.originalname
       const county = req.body.county || 'manual-upload'
+
+      // Generate unique job ID for this upload
+      const jobId = jobIdService.generateJobId('OCD_CBT')
+      console.log(`🆔 Generated Job ID for upload: ${jobId}`)
 
       console.log(`📤 Received upload for Vision processing: ${originalName} (${req.file.size} bytes)`)
       console.log(`📋 County: ${county}`)
@@ -798,7 +811,8 @@ class OcdCbtController {
         source_file: originalName,
         record_type: county,
         extraction_method: 'ghostscript-claude-vision',
-        project_origin: 'OCD_CBT'
+        project_origin: 'OCD_CBT',
+        jobid: jobId
       }))
 
       // Save to PostgreSQL

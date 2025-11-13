@@ -314,6 +314,11 @@ class EmnrdController {
   // Vision-based processing workflow - processes PDFs with Claude Vision (converts to images)
   async testWithVision(req, res) {
     const { execSync } = require('child_process')
+    const jobIdService = require('../services/job-id.service')
+
+    // Generate unique job ID for this processing run
+    const jobId = jobIdService.generateJobId('OCD_IMAGING')
+    console.log(`🆔 Generated Job ID for this run: ${jobId}`)
 
     // Track processing metrics
     const metrics = {
@@ -323,7 +328,8 @@ class EmnrdController {
       processingFailed: 0,
       successfullyProcessed: 0,
       totalContacts: 0,
-      skippedFiles: []
+      skippedFiles: [],
+      jobId
     }
 
     try {
@@ -546,7 +552,8 @@ class EmnrdController {
                     source_file: pdf.FileName,
                     record_type: applicant,
                     extraction_method: 'claude-native-pdf-fallback',
-                    project_origin: 'OCD_IMAGING'
+                    project_origin: 'OCD_IMAGING',
+                    jobid: jobId
                   }))
 
                   // Save to PostgreSQL
@@ -676,7 +683,8 @@ class EmnrdController {
                 source_file: pdf.FileName,
                 record_type: applicant,
                 extraction_method: 'ghostscript-claude-vision',
-                project_origin: 'OCD_IMAGING'
+                project_origin: 'OCD_IMAGING',
+                jobid: jobId
               }))
 
               // Save to PostgreSQL
@@ -891,6 +899,7 @@ class EmnrdController {
    */
   async uploadAndProcessNative(req, res) {
     let uploadedFilePath = null
+    const jobIdService = require('../services/job-id.service')
 
     try {
       // Check if file was uploaded
@@ -905,6 +914,10 @@ class EmnrdController {
       const originalName = req.file.originalname
       const applicantName = req.body.applicant || 'manual-upload'
       const documentType = req.body.documentType || 'oil-gas-contacts'
+
+      // Generate unique job ID for this upload
+      const jobId = jobIdService.generateJobId('OCD_IMAGING')
+      console.log(`🆔 Generated Job ID for upload: ${jobId}`)
 
       console.log(`📤 Received upload for native PDF processing: ${originalName} (${req.file.size} bytes)`)
       console.log(`📋 Applicant: ${applicantName}`)
@@ -938,7 +951,8 @@ class EmnrdController {
         ...c,
         source_file: originalName,
         record_type: applicantName,
-        project_origin: 'OCD_IMAGING'
+        project_origin: 'OCD_IMAGING',
+        jobid: jobId
       }))
 
       // Save to PostgreSQL
@@ -1008,6 +1022,7 @@ class EmnrdController {
    */
   async uploadAndProcessHybrid(req, res) {
     let uploadedFilePath = null
+    const jobIdService = require('../services/job-id.service')
 
     try {
       // Check if file was uploaded
@@ -1022,6 +1037,10 @@ class EmnrdController {
       const originalName = req.file.originalname
       const applicantName = req.body.applicant || 'manual-upload'
       const documentType = req.body.documentType || 'oil-gas-contacts'
+
+      // Generate unique job ID for this upload
+      const jobId = jobIdService.generateJobId('OCD_IMAGING')
+      console.log(`🆔 Generated Job ID for upload: ${jobId}`)
 
       console.log(`📤 Received upload for hybrid PDF processing: ${originalName} (${req.file.size} bytes)`)
       console.log(`📋 Applicant: ${applicantName}`)
@@ -1055,7 +1074,8 @@ class EmnrdController {
         ...c,
         source_file: originalName,
         record_type: applicantName,
-        project_origin: 'OCD_IMAGING'
+        project_origin: 'OCD_IMAGING',
+        jobid: jobId
       }))
 
       // Save to PostgreSQL

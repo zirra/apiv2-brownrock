@@ -75,6 +75,7 @@ class PostgresContactService {
       mineral_rights_percentage: claudeContact.mineral_rights_percentage || null,
       ownership_type: claudeContact.ownership_type || null,
       project_origin: claudeContact.project_origin || null,
+      jobid: claudeContact.jobid || null,
       acknowledged: false,
       islegal: this.isLegalEntity(claudeContact)
     };
@@ -893,6 +894,208 @@ class PostgresContactService {
       return {
         success: false,
         message: `Bulk delete failed: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * Find all contacts by job ID
+   * @param {string} jobId - The job ID to query
+   * @returns {Object} - Result object with contacts array
+   */
+  async findByJobId(jobId) {
+    try {
+      if (!jobId) {
+        return {
+          success: false,
+          message: 'Job ID is required'
+        };
+      }
+
+      const contacts = await this.Contact.findAll({
+        where: { jobid: jobId },
+        order: [['created_at', 'DESC']]
+      });
+
+      return {
+        success: true,
+        contacts,
+        count: contacts.length,
+        jobId
+      };
+    } catch (error) {
+      console.error(`❌ Failed to find contacts by job ID:`, error.message);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Find the latest job ID for a given project origin
+   * @param {string} projectOrigin - The project origin (e.g., 'OCD_IMAGING', 'OCD_CBT')
+   * @returns {Object} - Result object with latest job info
+   */
+  async findLatestJobByOrigin(projectOrigin) {
+    try {
+      if (!projectOrigin) {
+        return {
+          success: false,
+          message: 'Project origin is required'
+        };
+      }
+
+      // Find the most recent contact for this project origin
+      const latestContact = await this.Contact.findOne({
+        where: {
+          project_origin: projectOrigin,
+          jobid: {
+            [this.sequelize.Sequelize.Op.ne]: null
+          }
+        },
+        order: [['created_at', 'DESC']],
+        attributes: ['jobid', 'created_at']
+      });
+
+      if (!latestContact || !latestContact.jobid) {
+        return {
+          success: false,
+          message: `No jobs found for project origin: ${projectOrigin}`
+        };
+      }
+
+      // Now get all contacts from that job
+      const contacts = await this.Contact.findAll({
+        where: { jobid: latestContact.jobid },
+        order: [['created_at', 'DESC']]
+      });
+
+      return {
+        success: true,
+        jobId: latestContact.jobid,
+        projectOrigin,
+        contacts,
+        count: contacts.length,
+        jobCreatedAt: latestContact.created_at
+      };
+    } catch (error) {
+      console.error(`❌ Failed to find latest job:`, error.message);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Get statistics for a specific job
+   * @param {string} jobId - The job ID to analyze
+   * @returns {Object} - Result object with job statistics
+   */
+  async getJobStatistics(jobId) {
+    try {
+      if (!jobId) {
+        return {
+          success: false,
+          message: 'Job ID is required'
+        };
+      }
+
+      const contacts = await this.Contact.findAll({
+        where: { jobid: jobId },
+        attributes: [
+          'id', 'name', 'llc_owner', 'first_name', 'last_name',
+          'phone1', 'email1', 'islegal', 'acknowledged',
+          'project_origin', 'source_file', 'created_at'
+        ]
+      });
+
+      if (contacts.length === 0) {
+        return {
+          success: false,
+          message: `No contacts found for job ID: ${jobId}`
+        };
+      }
+
+      // Calculate statistics
+      const stats = {
+        totalContacts: contacts.length,
+        individuals: contacts.filter(c => !c.llc_owner).length,
+        businesses: contacts.filter(c => c.llc_owner).length,
+        withPhone: contacts.filter(c => c.phone1).length,
+        withEmail: contacts.filter(c => c.email1).length,
+        legal: contacts.filter(c => c.islegal).length,
+        acknowledged: contacts.filter(c => c.acknowledged).length,
+        projectOrigin: contacts[0].project_origin,
+        sourceFiles: [...new Set(contacts.map(c => c.source_file).filter(Boolean))],
+        createdAt: contacts[0].created_at
+      };
+
+      return {
+        success: true,
+        jobId,
+        statistics: stats,
+        contacts: contacts.map(c => ({
+          id: c.id,
+          name: c.name || `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+          company: c.llc_owner,
+          phone: c.phone1,
+          email: c.email1,
+          source: c.source_file
+        }))
+      };
+    } catch (error) {
+      console.error(`❌ Failed to get job statistics:`, error.message);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Get all unique job IDs for a project origin
+   * @param {string} projectOrigin - The project origin to query
+   * @returns {Object} - Result object with job IDs and counts
+   */
+  async getJobsByOrigin(projectOrigin) {
+    try {
+      if (!projectOrigin) {
+        return {
+          success: false,
+          message: 'Project origin is required'
+        };
+      }
+
+      // Get all unique job IDs with counts
+      const jobs = await this.sequelize.query(
+        `SELECT jobid, COUNT(*) as contact_count, MIN(created_at) as job_date
+         FROM contacts
+         WHERE project_origin = :projectOrigin AND jobid IS NOT NULL
+         GROUP BY jobid
+         ORDER BY job_date DESC`,
+        {
+          replacements: { projectOrigin },
+          type: this.sequelize.QueryTypes.SELECT
+        }
+      );
+
+      return {
+        success: true,
+        projectOrigin,
+        jobs: jobs.map(j => ({
+          jobId: j.jobid,
+          contactCount: parseInt(j.contact_count),
+          jobDate: j.job_date
+        })),
+        totalJobs: jobs.length
+      };
+    } catch (error) {
+      console.error(`❌ Failed to get jobs by origin:`, error.message);
+      return {
+        success: false,
+        error: error.message
       };
     }
   }

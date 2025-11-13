@@ -255,6 +255,13 @@ class Contact extends Model {
         validate: {
           len: [0, 255]
         }
+      },
+      jobid: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+        validate: {
+          len: [0, 100]
+        }
       }
     }, {
       sequelize,
@@ -291,6 +298,12 @@ class Contact extends Model {
         },
         {
           fields: ['mineral_rights_percentage']
+        },
+        {
+          fields: ['jobid']
+        },
+        {
+          fields: ['project_origin', 'jobid']
         }
       ]
     });
