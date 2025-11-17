@@ -830,6 +830,407 @@ Text content:
   },
 
   /**
+   * OLM (Oil & Mineral Lease) Contact Extraction
+   * For extracting contact information from OLM-related documents
+   */
+  'olm-contacts': {
+    native: `⚠️ CRITICAL INSTRUCTIONS:
+You are extracting ONLY contact information from oil and mineral lease documents, including mailing lists, interested parties, and ownership records.
+
+SCOPE:
+- Scan ALL pages independently
+- Tables and lists can appear on ANY page
+- Look for MULTIPLE tables/sections across all pages
+- Extract EVERY entry from EVERY relevant section
+
+TARGET PATTERNS (High Priority):
+Look for sections with these headers/titles:
+- "Mailing List" / "Distribution List" / "Notice List"
+- "Mineral Interest Owners" / "Working Interest Owners"
+- "Interested Parties" / "Parties to be Notified"
+- "Lessors" / "Lessees" / "Operators"
+- "Ownership Schedule" / "Interest Schedule"
+- Any table with columns like: Name, Address, City, State, Zip
+- Recorded mail receipts / Certified mail tracking
+- Tables with ownership percentages or interest types
+
+EXTRACT THESE FIELDS:
+- Company/Business name (if present)
+- Individual name (full name or first/last separately)
+- Complete mailing address
+- City, State, ZIP code
+- Phone numbers (with type if indicated)
+- Email addresses
+- Ownership percentages (if present)
+- Interest type (WI, ORRI, UMI, Royalty, etc.)
+- Lease identification numbers
+- Tract/Section/Township information (if present)
+- Dates (effective date, recorded date, etc.)
+
+EXCLUDE:
+- Attorneys, law firms, legal representatives (unless they are also listed as owners/lessors)
+- Headers, footers, page numbers
+- Form instructions or explanatory text
+- Notary sections or signature blocks
+
+⚠️ CRITICAL: TABULAR DATA PARSING RULES
+
+The documents may contain tables with columns: Name | Address | City | State | Zip Code | Interest %
+
+PARSE EACH COLUMN CORRECTLY:
+1. **Name Column** - Company or individual name → extract as "company" or "name"
+2. **Address Column** - FULL street address INCLUDING suite/unit numbers → extract as "address"
+   - May contain: "123 Main Street, Suite 200" (this is ALL address)
+   - May contain: "PO Box 1234" (post office boxes are valid)
+   - DO NOT split suite/unit from address
+   - DO NOT treat "Suite 200" or "Unit B" as a city
+3. **City Column** - This is the ACTUAL city → extract as "city"
+4. **State Column** - 2-letter state code → extract as "state"
+5. **Zip Code Column** - 5 or 9-digit ZIP → extract as "zip"
+6. **Interest/Ownership Column** - Extract percentage and type if present
+
+⚠️ COMMON MISTAKE TO AVOID:
+WRONG: Seeing "Suite 110" in address column and treating it as city
+RIGHT: Address column contains the COMPLETE street address - extract it as-is
+
+Examples of CORRECT parsing:
+
+Table Row: "DEVON ENERGY PRODUCTION COMPANY, L.P. | 333 W Sheridan Ave | Oklahoma City | OK | 73102 | 75.0% WI"
+Output:
+  - company: "DEVON ENERGY PRODUCTION COMPANY, L.P."
+  - address: "333 W Sheridan Ave"
+  - city: "Oklahoma City"
+  - state: "OK"
+  - zip: "73102"
+  - mineral_rights_percentage: 75.0
+  - ownership_type: "WI"
+
+Table Row: "John Smith | 456 Ranch Road, Unit 3 | Midland | TX | 79701"
+Output:
+  - name: "John Smith"
+  - first_name: "John"
+  - last_name: "Smith"
+  - address: "456 Ranch Road, Unit 3"
+  - city: "Midland"
+  - state: "TX"
+  - zip: "79701"
+
+Table Row: "APACHE CORPORATION | 2000 Post Oak Blvd, Suite 100 | Houston | TX | 77056-4400 | 25% ORRI"
+Output:
+  - company: "APACHE CORPORATION"
+  - address: "2000 Post Oak Blvd, Suite 100"
+  - city: "Houston"
+  - state: "TX"
+  - zip: "77056-4400"
+  - mineral_rights_percentage: 25.0
+  - ownership_type: "ORRI"
+
+PARSING REQUIREMENTS:
+- Read tables LEFT to RIGHT by column position
+- Address column = complete street address (may include suite/unit/PO Box)
+- City column = actual city (NEVER extract city from address column)
+- If you see "Suite", "STE", "Unit", "#", "PO Box" in address column → it's part of the address
+- Extract 2-letter state codes as-is
+- ZIP codes: 5 digits or 9 digits (12345 or 12345-6789)
+- Ownership percentages: Extract as decimal number (e.g., 75.5 for 75.5%)
+- Interest types: WI (Working Interest), ORRI (Overriding Royalty Interest), UMI (Unleased Mineral Interest), NRI (Net Revenue Interest)
+
+JSON FORMAT:
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Street address ONLY (no city/state/zip)",
+  "city": "City name only",
+  "state": "Two-letter state code",
+  "zip": "ZIP code only (5 or 9 digit)",
+  "phone": "Phone number with type if indicated",
+  "email": "Email address if present",
+  "mineral_rights_percentage": "Ownership percentage as number (0-100) or null",
+  "ownership_type": "WI, ORRI, UMI, NRI, Royalty, or null",
+  "lease_number": "Lease identification if present",
+  "tract_info": "Tract/Section/Township information if present",
+  "notes": "Additional relevant details",
+  "record_type": "individual/company/joint/trust",
+  "document_section": "Section name from document",
+  "page_number": "Page number where found"
+}
+
+REQUIREMENTS:
+- Return ONLY a JSON array of objects
+- Include ALL entries from ALL qualifying tables/sections across ALL pages
+- MUST parse addresses into separate fields (address, city, state, zip)
+- If address cannot be parsed, set fields individually to null but include what you can extract
+- If address is not available but party is listed, include with notes: "address_unknown: true"
+- No explanatory text outside the JSON array
+
+VERIFICATION CHECKLIST:
+□ Scanned every page from first to last
+□ Extracted from ALL contact/distribution/ownership tables found
+□ Parsed ALL addresses into separate components (address, city, state, zip)
+□ Extracted ownership percentages and interest types where present
+□ Counted all entries to ensure completeness
+□ Checked for multiple sections across different pages
+
+Text content:
+\${TEXT_CONTENT}`,
+
+    text: `Extract contact and ownership information from the following OLM document text content. Return ONLY a JSON array, no other text.
+
+EXTRACT:
+- Names (individuals, companies, trusts, partnerships)
+- Complete addresses
+- Phone/email if present
+- Ownership percentages and interest types
+- Lease numbers and tract information
+- Any relevant dates
+
+PRIORITY SOURCES (extract ALL):
+- Mineral interest owner schedules
+- Working interest owner lists
+- Royalty interest tables
+- Mailing/distribution lists
+- Lessor/lessee information
+- Operator contact information
+- Any section with repeated name + address patterns
+
+EXCLUDE (skip entirely):
+- Attorneys, lawyers, law firms, legal professionals (unless also listed as owners)
+- Notary public information
+- Signature blocks
+
+JSON FORMAT (return array of objects):
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Complete address",
+  "city": "City name",
+  "state": "State code",
+  "zip": "ZIP code",
+  "phone": "Phone with type",
+  "email": "Email if present",
+  "mineral_rights_percentage": "Ownership % as decimal (0-100), null if not specified",
+  "ownership_type": "WI, ORRI, UMI, NRI, or null",
+  "lease_number": "Lease ID if present",
+  "tract_info": "Tract/section number(s) if present",
+  "notes": "Additional details or address_unknown: true if no address",
+  "record_type": "individual/company/joint/trust",
+  "document_section": "Source table/section"
+}
+
+Requirements:
+- Return ONLY the JSON array, no explanatory text
+- Must have name/company AND address (or mark address_unknown: true)
+- Parse addresses into city, state, zip when possible
+- No text outside JSON array
+
+Text content:
+\${TEXT_CONTENT}`
+  },
+
+  /**
+   * PLC (Pipeline/Location Certificate) Contact Extraction
+   * For extracting contact information from PLC-related documents
+   */
+  'plc-contacts': {
+    native: `⚠️ CRITICAL INSTRUCTIONS:
+You are extracting ONLY contact information from pipeline, location certificate, and right-of-way documents, including property owners, operators, and interested parties.
+
+SCOPE:
+- Scan ALL pages independently
+- Tables and lists can appear on ANY page
+- Look for MULTIPLE tables/sections across all pages
+- Extract EVERY entry from EVERY relevant section
+
+TARGET PATTERNS (High Priority):
+Look for sections with these headers/titles:
+- "Mailing List" / "Distribution List" / "Property Owners"
+- "Surface Owners" / "Landowners" / "Right-of-Way Holders"
+- "Interested Parties" / "Parties to be Notified"
+- "Pipeline Operators" / "Facility Operators"
+- "Adjacent Property Owners" / "Affected Landowners"
+- Any table with columns like: Name, Address, City, State, Zip
+- Certified mail receipts / Notice lists
+- Tables with property descriptions or easement information
+
+EXTRACT THESE FIELDS:
+- Company/Business name (if present)
+- Individual name (full name or first/last separately)
+- Complete mailing address
+- City, State, ZIP code
+- Phone numbers (with type if indicated)
+- Email addresses
+- Property descriptions (legal descriptions, tract numbers)
+- Easement or right-of-way information
+- Pipeline identification numbers
+- Dates (effective date, notice date, etc.)
+
+EXCLUDE:
+- Attorneys, law firms, legal representatives (unless also listed as property owners)
+- Headers, footers, page numbers
+- Form instructions or explanatory text
+- Notary sections or signature blocks
+
+⚠️ CRITICAL: TABULAR DATA PARSING RULES
+
+The documents may contain tables with columns: Name | Address | City | State | Zip Code | Property Info
+
+PARSE EACH COLUMN CORRECTLY:
+1. **Name Column** - Company or individual name → extract as "company" or "name"
+2. **Address Column** - FULL street address INCLUDING suite/unit numbers → extract as "address"
+   - May contain: "123 Main Street, Suite 200" (this is ALL address)
+   - May contain: "PO Box 1234" (post office boxes are valid)
+   - May contain: "Rural Route 5" or "County Road 123"
+   - DO NOT split suite/unit from address
+   - DO NOT treat "Suite 200" or "Unit B" as a city
+3. **City Column** - This is the ACTUAL city → extract as "city"
+4. **State Column** - 2-letter state code → extract as "state"
+5. **Zip Code Column** - 5 or 9-digit ZIP → extract as "zip"
+6. **Property Column** - Extract legal description or tract information
+
+⚠️ COMMON MISTAKE TO AVOID:
+WRONG: Seeing "Suite 110" in address column and treating it as city
+RIGHT: Address column contains the COMPLETE street address - extract it as-is
+
+Examples of CORRECT parsing:
+
+Table Row: "PLAINS ALL AMERICAN PIPELINE, L.P. | 333 Clay Street, Suite 1600 | Houston | TX | 77002 | Section 12, T3N, R4E"
+Output:
+  - company: "PLAINS ALL AMERICAN PIPELINE, L.P."
+  - address: "333 Clay Street, Suite 1600"
+  - city: "Houston"
+  - state: "TX"
+  - zip: "77002"
+  - tract_info: "Section 12, T3N, R4E"
+
+Table Row: "Mary Johnson | 456 County Road 789 | Midland | TX | 79701 | Lot 5, Block 3"
+Output:
+  - name: "Mary Johnson"
+  - first_name: "Mary"
+  - last_name: "Johnson"
+  - address: "456 County Road 789"
+  - city: "Midland"
+  - state: "TX"
+  - zip: "79701"
+  - tract_info: "Lot 5, Block 3"
+
+Table Row: "MAGELLAN PIPELINE COMPANY | PO Box 22186 | Tulsa | OK | 74121 | Pipeline ROW #45-2024"
+Output:
+  - company: "MAGELLAN PIPELINE COMPANY"
+  - address: "PO Box 22186"
+  - city: "Tulsa"
+  - state: "OK"
+  - zip: "74121"
+  - notes: "Pipeline ROW #45-2024"
+
+PARSING REQUIREMENTS:
+- Read tables LEFT to RIGHT by column position
+- Address column = complete street address (may include suite/unit/PO Box/RR)
+- City column = actual city (NEVER extract city from address column)
+- If you see "Suite", "STE", "Unit", "#", "PO Box", "RR", "County Road" in address column → it's part of the address
+- Extract 2-letter state codes as-is
+- ZIP codes: 5 digits or 9 digits (12345 or 12345-6789)
+- Property descriptions: Extract legal descriptions, section/township/range, lot/block information
+
+JSON FORMAT:
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Street address ONLY (no city/state/zip)",
+  "city": "City name only",
+  "state": "Two-letter state code",
+  "zip": "ZIP code only (5 or 9 digit)",
+  "phone": "Phone number with type if indicated",
+  "email": "Email address if present",
+  "tract_info": "Legal description or property information",
+  "pipeline_id": "Pipeline identification if present",
+  "easement_info": "Right-of-way or easement details if present",
+  "notes": "Additional relevant details",
+  "record_type": "individual/company/joint/trust",
+  "document_section": "Section name from document",
+  "page_number": "Page number where found"
+}
+
+REQUIREMENTS:
+- Return ONLY a JSON array of objects
+- Include ALL entries from ALL qualifying tables/sections across ALL pages
+- MUST parse addresses into separate fields (address, city, state, zip)
+- If address cannot be parsed, set fields individually to null but include what you can extract
+- If address is not available but party is listed, include with notes: "address_unknown: true"
+- No explanatory text outside the JSON array
+
+VERIFICATION CHECKLIST:
+□ Scanned every page from first to last
+□ Extracted from ALL contact/distribution/property owner tables found
+□ Parsed ALL addresses into separate components (address, city, state, zip)
+□ Extracted property descriptions and pipeline information where present
+□ Counted all entries to ensure completeness
+□ Checked for multiple sections across different pages
+
+Text content:
+\${TEXT_CONTENT}`,
+
+    text: `Extract contact and property owner information from the following PLC document text content. Return ONLY a JSON array, no other text.
+
+EXTRACT:
+- Names (individuals, companies, trusts, partnerships)
+- Complete addresses (including rural routes, PO boxes)
+- Phone/email if present
+- Property descriptions and legal information
+- Pipeline or facility identification
+- Right-of-way or easement details
+- Any relevant dates
+
+PRIORITY SOURCES (extract ALL):
+- Property owner lists
+- Surface owner schedules
+- Pipeline operator information
+- Right-of-way holder lists
+- Mailing/distribution lists
+- Adjacent landowner notifications
+- Any section with repeated name + address patterns
+
+EXCLUDE (skip entirely):
+- Attorneys, lawyers, law firms, legal professionals (unless also listed as property owners)
+- Notary public information
+- Signature blocks
+
+JSON FORMAT (return array of objects):
+{
+  "company": "Business name or null",
+  "name": "Full name or null",
+  "first_name": "First name if separable",
+  "last_name": "Last name if separable",
+  "address": "Complete address",
+  "city": "City name",
+  "state": "State code",
+  "zip": "ZIP code",
+  "phone": "Phone with type",
+  "email": "Email if present",
+  "tract_info": "Legal description or property info",
+  "pipeline_id": "Pipeline identification if present",
+  "easement_info": "Easement or ROW details if present",
+  "notes": "Additional details or address_unknown: true if no address",
+  "record_type": "individual/company/joint/trust",
+  "document_section": "Source table/section"
+}
+
+Requirements:
+- Return ONLY the JSON array, no explanatory text
+- Must have name/company AND address (or mark address_unknown: true)
+- Parse addresses into city, state, zip when possible
+- No text outside JSON array
+
+Text content:
+\${TEXT_CONTENT}`
+  },
+
+  /**
    * Lease Agreement Extraction
    * For extracting lease terms and parties from lease agreements
    */

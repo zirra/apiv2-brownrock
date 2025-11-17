@@ -51,7 +51,7 @@ class DataService {
     return this.applicantNames
   }
 
-  async callForDataByCounty(countyName) {
+  async callForDataByCounty(countyName, appCatId = 'CTB') {
     const now = new Date();
     // 7 days in milliseconds
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
@@ -63,7 +63,7 @@ class DataService {
     // Use the current year
     const year = now.getFullYear();
 
-    let url =`OCD/Imaging/AdministrativeOrder/Files/Search/25/1?CountyName=${countyName}&ScanDate=${month}%2F${day}%2F${year}&ScanDateFilterExpression=GreaterThan&ApplicationCategoryId=CTB`
+    let url =`OCD/Imaging/AdministrativeOrder/Files/Search/25/1?CountyName=${countyName}&ScanDate=${month}%2F${day}%2F${year}&ScanDateFilterExpression=GreaterThan&ApplicationCategoryId=${appCatId}`
 
     console.log(`URL being called: ${url} <----------`)
     /*
@@ -87,7 +87,7 @@ class DataService {
       if (error.response?.status === 401) {
         console.warn('Token expired. Logging in again...')
         await this.authService.login()
-        return await this.callForDataByCounty(countyName)
+        return await this.callForDataByCounty(countyName, appCatId)
       }
       console.error('Data fetch failed:', error.message)
       await this.loggingService.writeMessage('dataError', error.message)

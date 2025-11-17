@@ -129,7 +129,7 @@ class OcdCbtController {
           await this.authService.login()
         }
 
-        const response = await this.dataService.callForDataByCounty(county)
+        const response = await this.dataService.callForDataByCounty(county, 'CTB')
 
         if (!response || !response.data || !Array.isArray(response.data.Items)) {
           console.warn(`⚠️ No valid data returned for county "${county}". Skipping...`)
