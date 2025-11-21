@@ -108,6 +108,7 @@ class OlmController {
     // Track processing metrics
     const metrics = {
       totalFiles: 0,
+      uploadFailed: 0,
       downloadFailed: 0,
       validationFailed: 0,
       processingFailed: 0,
@@ -168,6 +169,18 @@ class OlmController {
               fs.mkdirSync(localDir, { recursive: true })
             }
 
+            // First, upload PDF from EMNRD API to S3
+            try {
+              console.log(`☁️ Uploading ${pdf.FileName} to S3: ${s3Key}`)
+              await this.s3Service.uploadToS3(pdf.Url, s3Key)
+              console.log(`✅ Uploaded to S3: ${s3Key}`)
+            } catch (uploadError) {
+              console.error(`❌ Upload to S3 failed for ${pdf.FileName}: ${uploadError.message}`)
+              metrics.uploadFailed++
+              continue
+            }
+
+            // Then, download PDF from S3 for local processing
             let fileDownloadSuccess = false
             try {
               console.log(`⬇️ Downloading PDF from S3: ${s3Key}`)
