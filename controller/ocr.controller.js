@@ -32,7 +32,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: parseInt(process.env.MAX_UPLOAD_SIZE) || (50 * 1024 * 1024) // 50MB default
+    fileSize: parseInt(process.env.MAX_UPLOAD_SIZE) || (150 * 1024 * 1024) // 150MB default
   },
   fileFilter: function (req, file, cb) {
     if (file.mimetype === 'application/pdf') {

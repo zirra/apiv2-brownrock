@@ -5,9 +5,9 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(express.raw({ limit: '50mb' }));
+app.use(express.json({ limit: '150mb' }));
+app.use(express.urlencoded({ limit: '150mb', extended: true }));
+app.use(express.raw({ limit: '150mb' }));
 const port = process.env.PORT || 5151;
 
 const xPolicy = (req, res, next) => {
