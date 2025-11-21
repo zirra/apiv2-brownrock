@@ -338,7 +338,7 @@ class OcdCbtController {
                     source_file: pdf.FileName,
                     record_type: county,
                     extraction_method: 'claude-native-pdf-fallback',
-                    project_origin: 'OCD_CBT',
+                    project_origin: 'CTB',
                     jobid: jobId
                   }))
 
@@ -470,7 +470,7 @@ class OcdCbtController {
                 source_file: pdf.FileName,
                 record_type: county,
                 extraction_method: 'ghostscript-claude-vision',
-                project_origin: 'OCD_CBT',
+                project_origin: 'CTB',
                 jobid: jobId
               }))
 
@@ -811,7 +811,7 @@ class OcdCbtController {
         source_file: originalName,
         record_type: county,
         extraction_method: 'ghostscript-claude-vision',
-        project_origin: 'OCD_CBT',
+        project_origin: 'CTB',
         jobid: jobId
       }))
 

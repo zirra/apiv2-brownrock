@@ -332,7 +332,7 @@ contactsready table (enriched)
 
 ### Existing Pipelines
 - **EMNRD Vision** (Tuesday 11:59 PM) → `contacts` with `project_origin: 'OCD_IMAGING'`
-- **OCD_CBT** (Wednesday 11:59 PM) → `contacts` with `project_origin: 'OCD_CBT'`
+- **OCD_CBT** (Wednesday 11:59 PM) → `contacts` with `project_origin: 'CTB'`
 - **Migration** (Friday 11:59 PM) → `contacts` → `contactsready` / `businessentities`
 
 ## Notes and Considerations

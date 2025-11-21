@@ -306,7 +306,7 @@ class OlmController {
                   const enrichedContacts = contacts.map(c => ({
                     ...c,
                     source_file: pdf.FileName,
-                    record_type: applicant,
+                    record_type: county,
                     extraction_method: 'claude-native-pdf-fallback',
                     project_origin: 'OLM',
                     jobid: jobId
@@ -405,7 +405,7 @@ class OlmController {
               const enrichedContacts = contacts.map(c => ({
                 ...c,
                 source_file: pdf.FileName,
-                record_type: applicant,
+                record_type: county,
                 extraction_method: 'ghostscript-claude-vision',
                 project_origin: 'OLM',
                 jobid: jobId
