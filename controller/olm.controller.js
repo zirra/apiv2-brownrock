@@ -369,6 +369,7 @@ class OlmController {
               const maxDimension = 2000
               console.log(`🔍 Checking image sizes (max dimension: ${maxDimension}px)...`)
 
+              const validImageFiles = []
               for (const imagePath of imageFiles) {
                 try {
                   const { execSync } = require('child_process')
@@ -381,11 +382,16 @@ class OlmController {
                     execSync(resizeCommand, { stdio: 'pipe' })
                     console.log(`✅ Resized ${path.basename(imagePath)}`)
                   }
+                  validImageFiles.push(imagePath)
                 } catch (resizeError) {
-                  console.warn(`⚠️ Could not resize ${path.basename(imagePath)}: ${resizeError.message}`)
-                  // Continue anyway - image might still work
+                  console.warn(`⚠️ Could not process ${path.basename(imagePath)}: ${resizeError.message}. Skipping this image.`)
+                  // Skip images that fail ImageMagick processing
                 }
               }
+
+              // Update imageFiles to only include valid images
+              imageFiles.length = 0
+              imageFiles.push(...validImageFiles)
 
               // Process with Claude Vision
               const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
@@ -623,6 +629,7 @@ class OlmController {
       const maxDimension = 2000
       console.log(`🔍 Checking image sizes (max dimension: ${maxDimension}px)...`)
 
+      const validImageFiles = []
       for (const imagePath of imageFiles) {
         try {
           const identifyOutput = execSync(`identify -format "%wx%h" "${imagePath}"`, { encoding: 'utf8' })
@@ -634,10 +641,15 @@ class OlmController {
             execSync(resizeCommand, { stdio: 'pipe' })
             console.log(`✅ Resized ${path.basename(imagePath)}`)
           }
+          validImageFiles.push(imagePath)
         } catch (resizeError) {
-          console.warn(`⚠️ Could not resize ${path.basename(imagePath)}: ${resizeError.message}`)
+          console.warn(`⚠️ Could not process ${path.basename(imagePath)}: ${resizeError.message}. Skipping this image.`)
         }
       }
+
+      // Update imageFiles to only include valid images
+      imageFiles.length = 0
+      imageFiles.push(...validImageFiles)
 
       // Process with Claude Vision
       const ClaudeContactExtractor = require('../services/ClaudeContactExtractor.cjs')
