@@ -80,8 +80,15 @@ class EmnrdController {
 
   // Main workflow - processes PDFs from applicants
   async test(req, res) {
+    const jobIdService = require('../services/job-id.service')
+
     try {
       this.appScheduleRunning = true
+
+      // Generate unique job ID for this processing run
+      const jobId = jobIdService.generateJobId('OCD_IMAGING')
+      console.log(`🆔 Generated Job ID for this run: ${jobId}`)
+
       const applicantNames = this.dataService.getApplicantNames()
 
       for (let j = 0; j < applicantNames.length; j++) {
@@ -146,7 +153,10 @@ class EmnrdController {
                   const enrichedContacts = contacts.map(c => ({
                     ...c,
                     source_file: pdf.FileName,
-                    record_type: applicant
+                    record_type: applicant,
+                    extraction_method: 'hybrid-textract-claude',
+                    project_origin: 'OCD_IMAGING',
+                    jobid: jobId
                   }))
 
                   // Save to PostgreSQL
@@ -196,7 +206,10 @@ class EmnrdController {
                   const enrichedContacts = contacts.map(c => ({
                     ...c,
                     source_file: pdf.FileName,
-                    record_type: applicant
+                    record_type: applicant,
+                    extraction_method: 'hybrid-textract-claude',
+                    project_origin: 'OCD_IMAGING',
+                    jobid: jobId
                   }))
 
                   // Save to PostgreSQL
