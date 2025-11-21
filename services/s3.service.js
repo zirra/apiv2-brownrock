@@ -181,6 +181,40 @@ class S3Service {
   }
 
   /**
+   * Fetch object from S3 and return as Buffer
+   * @param {string} key - S3 key
+   * @returns {Promise<Buffer>} - File contents as buffer
+   */
+  async fetchFromS3(key) {
+    try {
+      console.log(`📥 Fetching buffer from S3: ${key}`)
+
+      const command = new GetObjectCommand({
+        Bucket: this.bucketName,
+        Key: key
+      })
+
+      const response = await this.s3Client.send(command)
+
+      // Convert stream to buffer
+      const chunks = []
+      for await (const chunk of response.Body) {
+        chunks.push(chunk)
+      }
+
+      const buffer = Buffer.concat(chunks)
+      console.log(`✅ Successfully fetched ${key} from S3 (${buffer.length} bytes)`)
+
+      return buffer
+
+    } catch (error) {
+      console.error(`❌ Failed to fetch ${key} from S3: ${error.message}`)
+      await this.loggingService.writeMessage('fetchFromS3Error', error.message)
+      throw error
+    }
+  }
+
+  /**
    * Delete object from S3
    */
   async deleteObject(key) {
