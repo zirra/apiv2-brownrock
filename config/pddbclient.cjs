@@ -23,9 +23,11 @@ const pgdbconnect = new Sequelize(
 
 const Contact = require('../models/contact.js');
 const ContactReady = require ('../models/contact-ready.js');
+const WhitepagesLookup = require('../models/whitepages-lookup.js');
 
 Contact.init(pgdbconnect);
 ContactReady.init(pgdbconnect);
+WhitepagesLookup.init(pgdbconnect);
 
 (async () => {
   try {
@@ -37,6 +39,7 @@ ContactReady.init(pgdbconnect);
     // Debug: Check what attributes Sequelize knows about
     console.log('ContactReady model attributes:', Object.keys(ContactReady.rawAttributes));
     console.log('Contact model attributes:', Object.keys(Contact.rawAttributes));
+    console.log('WhitepagesLookup model attributes:', Object.keys(WhitepagesLookup.rawAttributes));
   } catch (err) {
     console.error('Database connection/sync error:', err);
   }
@@ -46,5 +49,6 @@ module.exports = {
   pgdbconnect,
   Contact,
   ContactReady,
+  WhitepagesLookup,
   DataTypes
 }
