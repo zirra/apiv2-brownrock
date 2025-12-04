@@ -97,32 +97,52 @@ class WhitepagesTestController {
   async runTest(req, res) {
     try {
       const limit = parseInt(req.body.limit) || 25;
-      const delayMs = parseInt(req.body.delay) || 2000; // 2 second default delay
+      const delayMs = parseInt(req.body.delay) || 250; // 250ms default (safe for trial keys: 4 req/sec)
       const resetLookups = req.body.reset === true; // Option to clear previous test results
 
       console.log(`🧪 Starting WhitePages test run (${limit} contacts, ${delayMs}ms delay)...`);
 
+      // Get already-looked-up contact IDs to exclude (unless resetting)
+      let excludeIds = [];
+      if (!resetLookups) {
+        const existingLookups = await WhitepagesLookup.findAll({
+          attributes: ['contact_id'],
+          raw: true
+        });
+        excludeIds = existingLookups.map(l => l.contact_id);
+        console.log(`📋 Excluding ${excludeIds.length} already-looked-up contacts from SQL query`);
+      } else {
+        console.log(`🔄 Reset mode: Will reprocess contacts even if already looked up`);
+      }
+
       // Find contacts with COMPLETE data quality
       // STRICT Criteria: ALL fields required (first_name, last_name, address, city, state, zip)
+      const whereClause = {
+        [Op.and]: [
+          { first_name: { [Op.ne]: null } },
+          { first_name: { [Op.ne]: '' } },
+          { last_name: { [Op.ne]: null } },
+          { last_name: { [Op.ne]: '' } },
+          { address: { [Op.ne]: null } },
+          { address: { [Op.ne]: '' } },
+          { city: { [Op.ne]: null } },
+          { city: { [Op.ne]: '' } },
+          { state: { [Op.ne]: null } },
+          { state: { [Op.ne]: '' } },
+          { zip: { [Op.ne]: null } },
+          { zip: { [Op.ne]: '' } },
+          // State must be 2 letters (not "Texas 76092")
+          { state: { [Op.regexp]: '^[A-Z]{2}$' } }
+        ]
+      };
+
+      // Exclude already-looked-up contacts if not resetting
+      if (excludeIds.length > 0) {
+        whereClause.id = { [Op.notIn]: excludeIds };
+      }
+
       const allContacts = await Contact.findAll({
-        where: {
-          [Op.and]: [
-            { first_name: { [Op.ne]: null } },
-            { first_name: { [Op.ne]: '' } },
-            { last_name: { [Op.ne]: null } },
-            { last_name: { [Op.ne]: '' } },
-            { address: { [Op.ne]: null } },
-            { address: { [Op.ne]: '' } },
-            { city: { [Op.ne]: null } },
-            { city: { [Op.ne]: '' } },
-            { state: { [Op.ne]: null } },
-            { state: { [Op.ne]: '' } },
-            { zip: { [Op.ne]: null } },
-            { zip: { [Op.ne]: '' } },
-            // State must be 2 letters (not "Texas 76092")
-            { state: { [Op.regexp]: '^[A-Z]{2}$' } }
-          ]
-        },
+        where: whereClause,
         limit: limit * 3, // Get extra to filter out bad addresses
         order: [['created_at', 'DESC']]
       });
@@ -183,23 +203,6 @@ class WhitepagesTestController {
         const contact = contacts[i];
 
         try {
-          // Check if already looked up
-          const existingLookup = await WhitepagesLookup.findOne({
-            where: { contact_id: contact.id }
-          });
-
-          if (existingLookup && !resetLookups) {
-            console.log(`⏭️ Skipping ${contact.first_name} ${contact.last_name} (already looked up)`);
-            results.skipped++;
-            results.details.push({
-              contact_id: contact.id,
-              name: `${contact.first_name} ${contact.last_name}`,
-              status: 'skipped',
-              reason: 'Already has lookup record'
-            });
-            continue;
-          }
-
           console.log(`🔍 [${i + 1}/${contacts.length}] Looking up: ${contact.first_name} ${contact.last_name}`);
 
           // Perform lookup

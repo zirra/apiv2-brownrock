@@ -299,7 +299,7 @@ class WhitepagesService {
   /**
    * Batch process multiple contacts
    */
-  async processBatch(contacts, delayMs = 1000) {
+  async processBatch(contacts, delayMs = 250) {
     const results = {
       total: contacts.length,
       success: 0,

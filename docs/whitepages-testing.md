@@ -66,26 +66,28 @@ curl http://localhost:5151/v1/whitepages-test/select-test-contacts?limit=25
 **Parameters**:
 - `limit` (optional, default: 25) - Number of contacts to test
 - `delay` (optional, default: 2000) - Delay in milliseconds between API calls (rate limiting)
+  - Recommended: 250ms for trial keys (4 requests/sec)
+  - Recommended: 200ms for optimal trial performance (5 requests/sec)
 - `reset` (optional, default: false) - Clear previous test results before running
 
-**Example - First Run**:
+**Example - First Run** (trial key):
 ```bash
 curl -X POST http://localhost:5151/v1/whitepages-test/run-test \
   -H "Content-Type: application/json" \
   -d '{
     "limit": 25,
-    "delay": 2000,
+    "delay": 250,
     "reset": false
   }'
 ```
 
-**Example - Reset and Rerun**:
+**Example - Reset and Rerun** (trial key):
 ```bash
 curl -X POST http://localhost:5151/v1/whitepages-test/run-test \
   -H "Content-Type: application/json" \
   -d '{
     "limit": 25,
-    "delay": 2000,
+    "delay": 250,
     "reset": true
   }'
 ```
@@ -310,15 +312,21 @@ success_rate = (successful_lookups / (total - skipped)) * 100
 
 ## Rate Limiting
 
-**Recommended Delays**:
-- **Testing**: 2000ms (2 seconds) - conservative
-- **Production**: 1000ms (1 second) - balanced
-- **Aggressive**: 500ms (0.5 seconds) - only if API allows
+**WhitePages API Rate Limits**:
+- **Trial API Keys**: 5 requests/second (burst allowance: 5)
+- **Paid Plans**: 10 requests/second
 
-**Cost Considerations**:
+**Recommended Delays**:
+- **Trial Keys (Safe)**: 250ms (0.25 seconds) - 4 requests/second, stays under 5/sec limit
+- **Trial Keys (Optimal)**: 200ms (0.2 seconds) - 5 requests/second, right at limit
+- **Paid Plans (Safe)**: 125ms (0.125 seconds) - 8 requests/second, stays under 10/sec limit
+- **Paid Plans (Optimal)**: 100ms (0.1 seconds) - 10 requests/second, right at limit
+
+**Important Notes**:
+- The 429 errors occur when exceeding requests/second, not daily limits
+- If you see 429 errors, increase the delay (e.g., from 200ms to 250ms or 300ms)
 - Each lookup consumes 1 API credit
-- 25 contacts = 25 API credits
-- Set appropriate delays to avoid rate limit errors
+- 25 contacts = 25 API credits (~5 seconds with 200ms delay)
 
 ## Automation
 

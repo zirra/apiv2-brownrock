@@ -216,7 +216,42 @@ class ContactController {
       const Papa = require('papaparse')
       const csv = Papa.unparse(result.contacts, {
         header: true,
-        columns: ['id', 'name', 'company', 'first_name', 'last_name', 'address', 'phone', 'fax', 'email', 'notes', 'record_type', 'document_section', 'source_file', 'acknowledged', 'islegal', 'created_at', 'updated_at']
+        columns: [
+          'id',
+          'name',
+          'first_name',
+          'last_name',
+          'llc_owner',
+          'possible_relative',
+          'deceased_relative',
+          'phone1',
+          'phone2',
+          'phone3',
+          'phone4',
+          'phone5',
+          'phone6',
+          'phone7',
+          'phone8',
+          'email1',
+          'email2',
+          'address',
+          'city',
+          'state',
+          'zip',
+          'unit',
+          'notes',
+          'record_type',
+          'document_section',
+          'source_file',
+          'acknowledged',
+          'islegal',
+          'mineral_rights_percentage',
+          'ownership_type',
+          'project_origin',
+          'jobid',
+          'created_at',
+          'updated_at'
+        ]
       })
 
       // Set headers for CSV download
