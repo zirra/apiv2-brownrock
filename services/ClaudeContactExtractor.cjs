@@ -7,7 +7,8 @@ const { execSync } = require('child_process');
 const TableName = process.env.DYNAMO_TABLE
 const DynamoClient = require('../config/dynamoclient.cjs')
 const PostgresContactService = require('./postgres-contact.service.js')
-const extractionPrompts = require('../prompts/extraction-prompts.js')
+const extractionPrompts = require('../prompts/extraction-prompts.js') // Fallback for prompts
+const ExtractionPromptService = require('./extraction-prompt.service.js')
 require('dotenv').config()
 
 const {
@@ -67,20 +68,44 @@ class ClaudeContactExtractor {
     if (this.processingConfig.usePostgres) {
       this.postgresService = new PostgresContactService()
     }
+
+    // Initialize Extraction Prompt service for database-backed prompts
+    this.extractionPromptService = new ExtractionPromptService()
+    this.useDatabasePrompts = process.env.USE_DATABASE_PROMPTS !== 'false' // Default to true
   }
 
   /**
    * Get prompt for extraction based on document type and mode
    * @param {string} mode - 'native' for PDF vision or 'text' for extracted text
-   * @returns {string} - The prompt text
+   * @returns {Promise<string>} - The prompt text
    */
-  getPrompt(mode) {
+  async getPrompt(mode) {
     // If custom prompts provided, use those
     if (this.customPrompts && this.customPrompts[mode]) {
       return this.substitutePromptVariables(this.customPrompts[mode])
     }
 
-    // Otherwise use predefined prompts from library
+    // Try to load from database if enabled
+    if (this.useDatabasePrompts) {
+      try {
+        const result = await this.extractionPromptService.getPromptByKey(
+          this.documentType,
+          this.promptVariables
+        )
+
+        if (result.success && result.prompt) {
+          const processedPrompts = result.prompt.processed_prompts
+          this.logger.log(`✅ Loaded prompt from database: ${this.documentType} (version ${result.prompt.version})`)
+          return mode === 'native' ? processedPrompts.native : processedPrompts.text
+        }
+
+        this.logger.warn(`⚠️ Prompt not found in database: ${this.documentType}, falling back to JS file`)
+      } catch (error) {
+        this.logger.warn(`⚠️ Error loading prompt from database: ${error.message}, falling back to JS file`)
+      }
+    }
+
+    // Fallback to predefined prompts from JS library
     const prompts = extractionPrompts[this.documentType]
     if (!prompts) {
       this.logger.warn(`⚠️ Unknown document type: ${this.documentType}, falling back to oil-gas-contacts`)
@@ -991,7 +1016,7 @@ class ClaudeContactExtractor {
 
         // For large PDFs, skip table data to avoid token limits
         // Claude's vision can see the tables directly in the PDF
-        const basePrompt = this.getPrompt('native')
+        const basePrompt = await this.getPrompt('native')
         let prompt
 
         if (allExtractedTables.length > 20) {
@@ -1067,7 +1092,7 @@ class ClaudeContactExtractor {
         // PDF is under 100 pages, process as single document
         this.logger.info(`✅ PDF under 100-page limit, processing as single document`)
 
-        const prompt = this.getPrompt('native') + tableSummary
+        const prompt = await this.getPrompt('native') + tableSummary
 
         const response = await this.anthropic.messages.create({
           model: this.claudeConfig.model,
@@ -1144,7 +1169,7 @@ class ClaudeContactExtractor {
     const baseDelay = 2000 // 2 seconds
 
     // Get dynamic prompt based on document type
-    const prompt = this.getPrompt('native')
+    const prompt = await this.getPrompt('native')
 
     try {
       this.logger.info(`🚀 Calling Claude API with native PDF processing (attempt ${retryCount + 1}) for ${filename}...`)
@@ -1282,7 +1307,7 @@ class ClaudeContactExtractor {
    */
   async extractContactsFromImages(imageData, filename = 'document.pdf', retryCount = 0) {
     // Get dynamic prompt based on document type
-    const prompt = this.getPrompt('native')
+    const prompt = await this.getPrompt('native')
 
     try {
       this.logger.info(`🚀 Processing ${imageData.length} images for ${filename}...`)
@@ -1513,7 +1538,7 @@ class ClaudeContactExtractor {
     const baseDelay = 2000 // 2 seconds
 
     // Get dynamic prompt based on document type and substitute TEXT_CONTENT variable
-    let prompt = this.getPrompt('text')
+    let prompt = await this.getPrompt('text')
     prompt = prompt.replace(/\$\{TEXT_CONTENT\}/g, textContent)
 
     try {
