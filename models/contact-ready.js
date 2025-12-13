@@ -255,6 +255,30 @@ class ContactReady extends Model {
         validate: {
           len: [0, 255]
         }
+      },
+      app_number: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+        comment: 'EMNRD Application Number for source document search',
+        validate: {
+          len: [0, 100]
+        }
+      },
+      order_number: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+        comment: 'EMNRD Order Number for source document search',
+        validate: {
+          len: [0, 100]
+        }
+      },
+      case_number: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+        comment: 'EMNRD Case Number for source document search',
+        validate: {
+          len: [0, 100]
+        }
       }
     }, {
       sequelize,
@@ -296,6 +320,15 @@ class ContactReady extends Model {
         },
         {
           fields: ['mineral_rights_percentage']
+        },
+        {
+          fields: ['app_number']
+        },
+        {
+          fields: ['order_number']
+        },
+        {
+          fields: ['case_number']
         }
       ]
     });

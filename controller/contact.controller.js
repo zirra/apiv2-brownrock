@@ -249,6 +249,9 @@ class ContactController {
           'ownership_type',
           'project_origin',
           'jobid',
+          'app_number',
+          'order_number',
+          'case_number',
           'created_at',
           'updated_at'
         ]
@@ -371,7 +374,10 @@ class ContactController {
           notes: record.notes || '',
           record_type: record.record_type || null,
           document_section: record.document_section || null,
-          source_file: record.source_file || fileName || null
+          source_file: record.source_file || fileName || null,
+          app_number: record.app_number || null,
+          order_number: record.order_number || null,
+          case_number: record.case_number || null
         }
       })
 

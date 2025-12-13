@@ -110,7 +110,15 @@ class EmnrdController {
         const items = response.data.Items
         console.log(`✅ Retrieved ${items.length} items for ${applicant}`)
 
-        const allPdfs = items.flatMap(item => item.ImagingFiles || [])
+        // Keep track of which PDF belongs to which item (for App/Order/Case numbers)
+        const allPdfs = items.flatMap(item =>
+          (item.ImagingFiles || []).map(pdf => ({
+            ...pdf,
+            AppNumber: item.AppNumber || item.ApplicationNumber || null,
+            OrderNumber: item.OrderNumber || null,
+            CaseNumber: item.CaseNumber || null
+          }))
+        )
 
         if (!allPdfs.length) {
           console.log(`📭 No ImagingFiles found for "${applicant}".`)
@@ -156,7 +164,10 @@ class EmnrdController {
                     record_type: applicant,
                     extraction_method: 'hybrid-textract-claude',
                     project_origin: 'OCD_IMAGING',
-                    jobid: jobId
+                    jobid: jobId,
+                    app_number: pdf.AppNumber,
+                    order_number: pdf.OrderNumber,
+                    case_number: pdf.CaseNumber
                   }))
 
                   // Save to PostgreSQL
@@ -209,7 +220,10 @@ class EmnrdController {
                     record_type: applicant,
                     extraction_method: 'hybrid-textract-claude',
                     project_origin: 'OCD_IMAGING',
-                    jobid: jobId
+                    jobid: jobId,
+                    app_number: pdf.AppNumber,
+                    order_number: pdf.OrderNumber,
+                    case_number: pdf.CaseNumber
                   }))
 
                   // Save to PostgreSQL
@@ -368,7 +382,15 @@ class EmnrdController {
         const items = response.data.Items
         console.log(`✅ Retrieved ${items.length} items for ${applicant}`)
 
-        const allPdfs = items.flatMap(item => item.ImagingFiles || [])
+        // Keep track of which PDF belongs to which item (for App/Order/Case numbers)
+        const allPdfs = items.flatMap(item =>
+          (item.ImagingFiles || []).map(pdf => ({
+            ...pdf,
+            AppNumber: item.AppNumber || item.ApplicationNumber || null,
+            OrderNumber: item.OrderNumber || null,
+            CaseNumber: item.CaseNumber || null
+          }))
+        )
 
         if (!allPdfs.length) {
           console.log(`📭 No ImagingFiles found for "${applicant}".`)
@@ -566,7 +588,10 @@ class EmnrdController {
                     record_type: applicant,
                     extraction_method: 'claude-native-pdf-fallback',
                     project_origin: 'OCD_IMAGING',
-                    jobid: jobId
+                    jobid: jobId,
+                    app_number: pdf.AppNumber,
+                    order_number: pdf.OrderNumber,
+                    case_number: pdf.CaseNumber
                   }))
 
                   // Save to PostgreSQL
@@ -697,7 +722,10 @@ class EmnrdController {
                 record_type: applicant,
                 extraction_method: 'ghostscript-claude-vision',
                 project_origin: 'OCD_IMAGING',
-                jobid: jobId
+                jobid: jobId,
+                app_number: pdf.AppNumber,
+                order_number: pdf.OrderNumber,
+                case_number: pdf.CaseNumber
               }))
 
               // Save to PostgreSQL
@@ -927,6 +955,9 @@ class EmnrdController {
       const originalName = req.file.originalname
       const applicantName = req.body.applicant || 'manual-upload'
       const documentType = req.body.documentType || 'oil-gas-contacts'
+      const appNumber = req.body.appNumber || req.body.app_number || null
+      const orderNumber = req.body.orderNumber || req.body.order_number || null
+      const caseNumber = req.body.caseNumber || req.body.case_number || null
 
       // Generate unique job ID for this upload
       const jobId = jobIdService.generateJobId('OCD_IMAGING')
@@ -935,6 +966,9 @@ class EmnrdController {
       console.log(`📤 Received upload for native PDF processing: ${originalName} (${req.file.size} bytes)`)
       console.log(`📋 Applicant: ${applicantName}`)
       console.log(`📄 Document Type: ${documentType}`)
+      if (appNumber) console.log(`📄 App Number: ${appNumber}`)
+      if (orderNumber) console.log(`📄 Order Number: ${orderNumber}`)
+      if (caseNumber) console.log(`📄 Case Number: ${caseNumber}`)
 
       // Read PDF buffer
       const pdfBuffer = fs.readFileSync(uploadedFilePath)
@@ -965,7 +999,10 @@ class EmnrdController {
         source_file: originalName,
         record_type: applicantName,
         project_origin: 'OCD_IMAGING',
-        jobid: jobId
+        jobid: jobId,
+        app_number: appNumber,
+        order_number: orderNumber,
+        case_number: caseNumber
       }))
 
       // Save to PostgreSQL
@@ -1050,6 +1087,9 @@ class EmnrdController {
       const originalName = req.file.originalname
       const applicantName = req.body.applicant || 'manual-upload'
       const documentType = req.body.documentType || 'oil-gas-contacts'
+      const appNumber = req.body.appNumber || req.body.app_number || null
+      const orderNumber = req.body.orderNumber || req.body.order_number || null
+      const caseNumber = req.body.caseNumber || req.body.case_number || null
 
       // Generate unique job ID for this upload
       const jobId = jobIdService.generateJobId('OCD_IMAGING')
@@ -1058,6 +1098,9 @@ class EmnrdController {
       console.log(`📤 Received upload for hybrid PDF processing: ${originalName} (${req.file.size} bytes)`)
       console.log(`📋 Applicant: ${applicantName}`)
       console.log(`📄 Document Type: ${documentType}`)
+      if (appNumber) console.log(`📄 App Number: ${appNumber}`)
+      if (orderNumber) console.log(`📄 Order Number: ${orderNumber}`)
+      if (caseNumber) console.log(`📄 Case Number: ${caseNumber}`)
 
       // Read PDF buffer
       const pdfBuffer = fs.readFileSync(uploadedFilePath)
@@ -1088,7 +1131,10 @@ class EmnrdController {
         source_file: originalName,
         record_type: applicantName,
         project_origin: 'OCD_IMAGING',
-        jobid: jobId
+        jobid: jobId,
+        app_number: appNumber,
+        order_number: orderNumber,
+        case_number: caseNumber
       }))
 
       // Save to PostgreSQL
