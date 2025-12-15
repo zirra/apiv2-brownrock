@@ -114,9 +114,9 @@ class EmnrdController {
         const allPdfs = items.flatMap(item =>
           (item.ImagingFiles || []).map(pdf => ({
             ...pdf,
-            AppNumber: item.AppNumber || item.ApplicationNumber || null,
-            OrderNumber: item.OrderNumber || null,
-            CaseNumber: item.CaseNumber || null
+            AppNumber: item.ApplicationNo || null,
+            OrderNumber: item.OrderNo || null,
+            CaseNumber: item.AdminOrderNo || null  // Using AdminOrderNo as case number
           }))
         )
 
@@ -386,9 +386,9 @@ class EmnrdController {
         const allPdfs = items.flatMap(item =>
           (item.ImagingFiles || []).map(pdf => ({
             ...pdf,
-            AppNumber: item.AppNumber || item.ApplicationNumber || null,
-            OrderNumber: item.OrderNumber || null,
-            CaseNumber: item.CaseNumber || null
+            AppNumber: item.ApplicationNo || null,
+            OrderNumber: item.OrderNo || null,
+            CaseNumber: item.AdminOrderNo || null  // Using AdminOrderNo as case number
           }))
         )
 

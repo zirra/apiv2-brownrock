@@ -141,7 +141,21 @@ class PlcController {
         const items = response.data.Items
         console.log(`✅ Retrieved ${items.length} items for ${county}`)
 
-        const allPdfs = items.flatMap(item => item.ImagingFiles || [])
+        // Debug: Log first item structure to see available fields
+        if (items.length > 0) {
+          console.log('🔍 DEBUG - First item keys:', Object.keys(items[0]))
+          console.log('🔍 DEBUG - First item sample:', JSON.stringify(items[0], null, 2).substring(0, 500))
+        }
+
+        // Keep track of which PDF belongs to which item (for App/Order/Case numbers)
+        const allPdfs = items.flatMap(item =>
+          (item.ImagingFiles || []).map(pdf => ({
+            ...pdf,
+            AppNumber: item.ApplicationNo || null,
+            OrderNumber: item.OrderNo || null,
+            CaseNumber: item.AdminOrderNo || null  // Using AdminOrderNo as case number
+          }))
+        )
 
         if (!allPdfs.length) {
           console.log(`📭 No ImagingFiles found for "${county}".`)
@@ -322,7 +336,10 @@ class PlcController {
                     record_type: county,
                     extraction_method: 'claude-native-pdf-fallback',
                     project_origin: 'PLC',
-                    jobid: jobId
+                    jobid: jobId,
+                    app_number: pdf.AppNumber,
+                    order_number: pdf.OrderNumber,
+                    case_number: pdf.CaseNumber
                   }))
 
                   // Save to PostgreSQL
@@ -427,7 +444,10 @@ class PlcController {
                 record_type: county,
                 extraction_method: 'ghostscript-claude-vision',
                 project_origin: 'PLC',
-                jobid: jobId
+                jobid: jobId,
+                app_number: pdf.AppNumber,
+                order_number: pdf.OrderNumber,
+                case_number: pdf.CaseNumber
               }))
 
               // Save to PostgreSQL
@@ -678,14 +698,17 @@ class PlcController {
       const claudeTime = Date.now() - startClaudeTime
       console.log(`✅ Claude analyzed ${imageFiles.length} images and extracted ${contacts.length} contacts in ${claudeTime}ms`)
 
-      // Add metadata to contacts
+      // Add metadata to contacts (manual uploads won't have App/Order/Case numbers)
       const enrichedContacts = contacts.map(c => ({
         ...c,
         source_file: originalName,
         record_type: applicant,
         extraction_method: 'ghostscript-claude-vision',
         project_origin: 'PLC',
-        jobid: jobId
+        jobid: jobId,
+        app_number: null,
+        order_number: null,
+        case_number: null
       }))
 
       // Save to PostgreSQL

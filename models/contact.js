@@ -172,7 +172,8 @@ class Contact extends Model {
         validate: {
           len: [0, 10],
           isZipCode(value) {
-            if (value && !/^\d{5}(-\d{4})?$/.test(value)) {
+            // Allow empty, null, or valid ZIP formats (5 digits, ZIP+4, or partial)
+            if (value && value.trim() && !/^\d{3,5}(-\d{4})?$/.test(value.trim())) {
               throw new Error('Invalid ZIP code format');
             }
           }

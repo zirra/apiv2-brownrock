@@ -76,6 +76,9 @@ class PostgresContactService {
       ownership_type: claudeContact.ownership_type || null,
       project_origin: claudeContact.project_origin || null,
       jobid: claudeContact.jobid || null,
+      app_number: claudeContact.app_number || null,
+      order_number: claudeContact.order_number || null,
+      case_number: claudeContact.case_number || null,
       acknowledged: false,
       islegal: this.isLegalEntity(claudeContact)
     };
