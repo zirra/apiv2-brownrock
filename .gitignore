@@ -11,6 +11,15 @@ brownrock.web
 .env.*.local
 .env.*
 
+# SSL/TLS certificates and private keys
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+*.pfx
+certs/
+
 # Editor directories and files
 .idea
 .vscode
