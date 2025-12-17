@@ -111,12 +111,13 @@ class EmnrdController {
         console.log(`✅ Retrieved ${items.length} items for ${applicant}`)
 
         // Keep track of which PDF belongs to which item (for App/Order/Case numbers)
+        // Note: EMNRD API returns CaseNumber, HearingOrderNumber, and RecordNo fields
         const allPdfs = items.flatMap(item =>
           (item.ImagingFiles || []).map(pdf => ({
             ...pdf,
-            AppNumber: item.ApplicationNo || null,
-            OrderNumber: item.OrderNo || null,
-            CaseNumber: item.AdminOrderNo || null  // Using AdminOrderNo as case number
+            AppNumber: item.RecordNo || null,  // Using RecordNo as application number
+            OrderNumber: item.HearingOrderNumber || null,  // Actual field name from API
+            CaseNumber: item.CaseNumber || null  // Actual field name from API
           }))
         )
 
@@ -383,12 +384,13 @@ class EmnrdController {
         console.log(`✅ Retrieved ${items.length} items for ${applicant}`)
 
         // Keep track of which PDF belongs to which item (for App/Order/Case numbers)
+        // Note: EMNRD API returns CaseNumber, HearingOrderNumber, and RecordNo fields
         const allPdfs = items.flatMap(item =>
           (item.ImagingFiles || []).map(pdf => ({
             ...pdf,
-            AppNumber: item.ApplicationNo || null,
-            OrderNumber: item.OrderNo || null,
-            CaseNumber: item.AdminOrderNo || null  // Using AdminOrderNo as case number
+            AppNumber: item.RecordNo || null,  // Using RecordNo as application number
+            OrderNumber: item.HearingOrderNumber || null,  // Actual field name from API
+            CaseNumber: item.CaseNumber || null  // Actual field name from API
           }))
         )
 
