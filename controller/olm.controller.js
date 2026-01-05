@@ -100,10 +100,15 @@ class OlmController {
   async processWithVision(req, res) {
     const { execSync } = require('child_process')
     const jobIdService = require('../services/job-id.service')
+    const JobRunService = require('../services/job-run.service.js')
+    const jobRunService = new JobRunService()
 
     // Generate unique job ID for this processing run
     const jobId = jobIdService.generateJobId('OLM')
     console.log(`🆔 Generated Job ID for this run: ${jobId}`)
+
+    // Determine trigger type (manual if called via HTTP, cron otherwise)
+    const triggerType = res ? 'manual' : 'cron'
 
     // Track processing metrics
     const metrics = {
@@ -116,6 +121,18 @@ class OlmController {
       totalContacts: 0,
       skippedFiles: [],
       jobId
+    }
+
+    // Create job run record
+    try {
+      await jobRunService.createJobRun({
+        job_id: jobId,
+        job_type: 'OLM',
+        trigger_type: triggerType
+      })
+    } catch (trackingErr) {
+      console.error('Failed to create job run record:', trackingErr.message)
+      // Continue with job execution even if tracking fails
     }
 
     try {
@@ -512,6 +529,13 @@ class OlmController {
       console.log(`⏭️ Files skipped: ${metrics.skippedFiles.length}`)
       console.log('='.repeat(80) + '\n')
 
+      // Mark job as completed
+      try {
+        await jobRunService.markJobCompleted(jobId, metrics)
+      } catch (trackingErr) {
+        console.error('Failed to mark job as completed:', trackingErr.message)
+      }
+
       if (res) {
         res.status(200).json({
           success: true,
@@ -525,6 +549,13 @@ class OlmController {
     } catch (err) {
       console.error(`💥 Fatal error in processWithVision(): ${err.message}`)
       await this.loggingService.writeMessage('olmProcessWithVisionFatal', err.message)
+
+      // Mark job as failed
+      try {
+        await jobRunService.markJobFailed(jobId, err.message, err.stack, metrics)
+      } catch (trackingErr) {
+        console.error('Failed to mark job as failed:', trackingErr.message)
+      }
 
       this.appScheduleRunning = false
 

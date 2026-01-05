@@ -936,6 +936,33 @@ class PostgresContactService {
   }
 
   /**
+   * Get contacts by job ID with pagination
+   * @param {string} jobId - Job ID to find contacts for
+   * @param {number} limit - Number of results to return
+   * @param {number} offset - Number of results to skip
+   * @returns {Promise<Object>} - { rows, count }
+   */
+  async getContactsByJobId(jobId, limit = 50, offset = 0) {
+    try {
+      if (!jobId) {
+        throw new Error('Job ID is required');
+      }
+
+      const { rows, count } = await this.Contact.findAndCountAll({
+        where: { jobid: jobId },
+        order: [['created_at', 'DESC']],
+        limit,
+        offset
+      });
+
+      return { rows, count };
+    } catch (error) {
+      console.error(`❌ Failed to get contacts by job ID:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
    * Find the latest job ID for a given project origin
    * @param {string} projectOrigin - The project origin (e.g., 'OCD_IMAGING', 'OCD_CBT')
    * @returns {Object} - Result object with latest job info

@@ -343,10 +343,15 @@ class EmnrdController {
   async testWithVision(req, res) {
     const { execSync } = require('child_process')
     const jobIdService = require('../services/job-id.service')
+    const JobRunService = require('../services/job-run.service.js')
+    const jobRunService = new JobRunService()
 
     // Generate unique job ID for this processing run
     const jobId = jobIdService.generateJobId('OCD_IMAGING')
     console.log(`🆔 Generated Job ID for this run: ${jobId}`)
+
+    // Determine trigger type (manual if called via HTTP, cron otherwise)
+    const triggerType = res ? 'manual' : 'cron'
 
     // Track processing metrics
     const metrics = {
@@ -358,6 +363,18 @@ class EmnrdController {
       totalContacts: 0,
       skippedFiles: [],
       jobId
+    }
+
+    // Create job run record
+    try {
+      await jobRunService.createJobRun({
+        job_id: jobId,
+        job_type: 'OCD_IMAGING',
+        trigger_type: triggerType
+      })
+    } catch (trackingErr) {
+      console.error('Failed to create job run record:', trackingErr.message)
+      // Continue with job execution even if tracking fails
     }
 
     try {
@@ -865,6 +882,13 @@ class EmnrdController {
 
       console.log('═══════════════════════════════════════════════════════════\n')
 
+      // Mark job as completed
+      try {
+        await jobRunService.markJobCompleted(jobId, metrics)
+      } catch (trackingErr) {
+        console.error('Failed to mark job as completed:', trackingErr.message)
+      }
+
       if (res) {
         return res.status(200).send({
           message: 'Vision PDF processing completed.',
@@ -886,6 +910,13 @@ class EmnrdController {
     } catch (err) {
       console.error(`💥 Fatal error in testWithVision(): ${err.message}`)
       await this.loggingService.writeMessage('testWithVisionFatal', err.message)
+
+      // Mark job as failed
+      try {
+        await jobRunService.markJobFailed(jobId, err.message, err.stack, metrics)
+      } catch (trackingErr) {
+        console.error('Failed to mark job as failed:', trackingErr.message)
+      }
 
       if (res) {
         return res.status(500).send({ error: err.message })

@@ -153,6 +153,15 @@ app.get('/v1/postgres-contacts-direct', async (req, res) => {
 // Load controllers after defining base routes
 loadControllers()
 
-app.listen(port, () => {
+app.listen(port, async () => {
   console.log(`Server is running on port ${port}`)
+
+  // Clean up stale job runs on startup
+  try {
+    const JobRunService = require('./services/job-run.service.js')
+    const jobRunService = new JobRunService()
+    await jobRunService.cleanupStaleJobs()
+  } catch (error) {
+    console.error('Failed to cleanup stale jobs on startup:', error.message)
+  }
 });

@@ -26,12 +26,14 @@ const ContactReady = require ('../models/contact-ready.js');
 const WhitepagesLookup = require('../models/whitepages-lookup.js');
 const ExtractionPrompt = require('../models/extraction-prompt.js');
 const ExtractionPromptVersion = require('../models/extraction-prompt-version.js');
+const JobRun = require('../models/job-run.js');
 
 Contact.init(pgdbconnect);
 ContactReady.init(pgdbconnect);
 WhitepagesLookup.init(pgdbconnect);
 ExtractionPrompt.init(pgdbconnect);
 ExtractionPromptVersion.init(pgdbconnect);
+JobRun.init(pgdbconnect);
 
 // Set up associations
 ExtractionPromptVersion.associate({ ExtractionPrompt });
@@ -49,6 +51,7 @@ ExtractionPromptVersion.associate({ ExtractionPrompt });
     console.log('WhitepagesLookup model attributes:', Object.keys(WhitepagesLookup.rawAttributes));
     console.log('ExtractionPrompt model attributes:', Object.keys(ExtractionPrompt.rawAttributes));
     console.log('ExtractionPromptVersion model attributes:', Object.keys(ExtractionPromptVersion.rawAttributes));
+    console.log('JobRun model attributes:', Object.keys(JobRun.rawAttributes));
   } catch (err) {
     console.error('Database connection/sync error:', err);
   }
@@ -61,5 +64,6 @@ module.exports = {
   WhitepagesLookup,
   ExtractionPrompt,
   ExtractionPromptVersion,
+  JobRun,
   DataTypes
 }
