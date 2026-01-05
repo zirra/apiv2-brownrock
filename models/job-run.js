@@ -11,7 +11,6 @@ class JobRun extends Model {
       job_id: {
         type: DataTypes.STRING(100),
         allowNull: false,
-        unique: true,
         comment: 'Unique job identifier from jobIdService',
         validate: {
           len: [1, 100],
