@@ -1,9 +1,10 @@
 require('dotenv').config();
-const { pgdbconnect, Contact } = require('../config/pddbclient.cjs');
+const { pgdbconnect, Contact, ContactReady } = require('../config/pddbclient.cjs');
 
 class PostgresContactService {
   constructor() {
     this.Contact = Contact;
+    this.ContactReady = ContactReady;
     this.sequelize = pgdbconnect;
   }
 
@@ -1128,6 +1129,229 @@ class PostgresContactService {
         error: error.message
       };
     }
+  }
+
+  /**
+   * Move non-duplicate contacts from contacts table to contactsready table
+   * Uses the unique constraint on contactsready to filter duplicates:
+   * (name, first_name, last_name, llc_owner, address, city, state, zip)
+   *
+   * @param {Object} options - Options for the migration
+   * @param {number} options.limit - Maximum number of contacts to process (default: 1000)
+   * @param {number} options.offset - Number of contacts to skip (default: 0)
+   * @param {string} options.job_id - Filter by specific job_id (optional)
+   * @param {string} options.project_origin - Filter by project_origin (optional)
+   * @returns {Promise<Object>} - Result with counts of moved, skipped, and failed contacts
+   */
+  async moveContactsToReady(options = {}) {
+    const {
+      limit = 1000,
+      offset = 0,
+      job_id = null,
+      project_origin = null
+    } = options;
+
+    try {
+      console.log('📦 Starting contact migration from contacts to contactsready...');
+      console.log(`   Limit: ${limit}, Offset: ${offset}`);
+      if (job_id) console.log(`   Filtering by job_id: ${job_id}`);
+      if (project_origin) console.log(`   Filtering by project_origin: ${project_origin}`);
+
+      // Build where clause for filtering
+      const where = {};
+      if (job_id) where.jobid = job_id;
+      if (project_origin) where.project_origin = project_origin;
+
+      // Get contacts from contacts table
+      const contacts = await this.Contact.findAll({
+        where,
+        limit,
+        offset,
+        order: [['created_at', 'DESC']]
+      });
+
+      if (contacts.length === 0) {
+        console.log('📭 No contacts found to migrate');
+        return {
+          success: true,
+          processed: 0,
+          moved: 0,
+          skipped: 0,
+          failed: 0,
+          message: 'No contacts found to migrate'
+        };
+      }
+
+      console.log(`📊 Found ${contacts.length} contacts to process`);
+
+      let moved = 0;
+      let skipped = 0;
+      let failed = 0;
+      const failedContacts = [];
+
+      // Get valid fields for ContactReady model (only once, outside loop)
+      const validFields = Object.keys(this.ContactReady.rawAttributes);
+
+      // Process each contact
+      for (const contact of contacts) {
+        try {
+          // Convert to plain object and remove id/timestamps for insertion
+          const contactData = contact.toJSON();
+          delete contactData.id;
+          delete contactData.created_at;
+          delete contactData.updated_at;
+
+          // Filter to only include fields that exist in ContactReady
+          const filteredData = {};
+          for (const key of validFields) {
+            if (key !== 'id' && key !== 'created_at' && key !== 'updated_at' && contactData.hasOwnProperty(key)) {
+              filteredData[key] = contactData[key];
+            }
+          }
+
+          // Try to insert into contactsready
+          // findOrCreate will skip if unique constraint is violated
+          const [created] = await this.ContactReady.findOrCreate({
+            where: {
+              name: filteredData.name,
+              first_name: filteredData.first_name,
+              last_name: filteredData.last_name,
+              llc_owner: filteredData.llc_owner,
+              address: filteredData.address,
+              city: filteredData.city,
+              state: filteredData.state,
+              zip: filteredData.zip
+            },
+            defaults: filteredData
+          });
+
+          if (created) {
+            moved++;
+            if (moved % 100 === 0) {
+              console.log(`   ✅ Moved ${moved} contacts so far...`);
+            }
+          } else {
+            skipped++;
+          }
+
+        } catch (error) {
+          failed++;
+          failedContacts.push({
+            contact_id: contact.id,
+            name: contact.name,
+            error: error.message
+          });
+          console.error(`   ❌ Failed to move contact ${contact.id}:`, error.message);
+        }
+      }
+
+      // Summary
+      console.log('\n' + '='.repeat(80));
+      console.log('📊 CONTACT MIGRATION SUMMARY');
+      console.log('='.repeat(80));
+      console.log(`Total processed: ${contacts.length}`);
+      console.log(`✅ Successfully moved: ${moved}`);
+      console.log(`⏭️ Skipped (duplicates): ${skipped}`);
+      console.log(`❌ Failed: ${failed}`);
+      console.log('='.repeat(80) + '\n');
+
+      return {
+        success: true,
+        processed: contacts.length,
+        moved,
+        skipped,
+        failed,
+        failedContacts: failedContacts.length > 0 ? failedContacts : undefined,
+        message: `Successfully moved ${moved} contacts, skipped ${skipped} duplicates, ${failed} failed`
+      };
+
+    } catch (error) {
+      console.error('❌ Failed to move contacts to ready:', error.message);
+      return {
+        success: false,
+        error: error.message,
+        processed: 0,
+        moved: 0,
+        skipped: 0,
+        failed: 0
+      };
+    }
+  }
+
+  /**
+   * Move all contacts from a specific job to contactsready
+   * Convenience method that calls moveContactsToReady with job_id filter
+   *
+   * @param {string} jobId - Job ID to migrate contacts from
+   * @returns {Promise<Object>} - Result with counts
+   */
+  async moveJobContactsToReady(jobId) {
+    return this.moveContactsToReady({ job_id: jobId, limit: 10000 });
+  }
+
+  /**
+   * Move all contacts from a specific project origin to contactsready
+   * Processes in batches to handle large datasets
+   *
+   * @param {string} projectOrigin - Project origin to migrate (e.g., 'OCD_IMAGING')
+   * @param {number} batchSize - Number of contacts per batch (default: 1000)
+   * @returns {Promise<Object>} - Aggregate result with total counts
+   */
+  async moveProjectContactsToReady(projectOrigin, batchSize = 1000) {
+    console.log(`📦 Starting batch migration for project: ${projectOrigin}`);
+
+    let totalMoved = 0;
+    let totalSkipped = 0;
+    let totalFailed = 0;
+    let totalProcessed = 0;
+    let offset = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      console.log(`\n🔄 Processing batch starting at offset ${offset}...`);
+
+      const result = await this.moveContactsToReady({
+        project_origin: projectOrigin,
+        limit: batchSize,
+        offset
+      });
+
+      if (!result.success) {
+        console.error(`❌ Batch failed at offset ${offset}:`, result.error);
+        break;
+      }
+
+      totalMoved += result.moved;
+      totalSkipped += result.skipped;
+      totalFailed += result.failed;
+      totalProcessed += result.processed;
+
+      // If we got fewer contacts than the batch size, we're done
+      if (result.processed < batchSize) {
+        hasMore = false;
+      } else {
+        offset += batchSize;
+      }
+    }
+
+    console.log('\n' + '='.repeat(80));
+    console.log(`📊 COMPLETE PROJECT MIGRATION SUMMARY: ${projectOrigin}`);
+    console.log('='.repeat(80));
+    console.log(`Total processed: ${totalProcessed}`);
+    console.log(`✅ Successfully moved: ${totalMoved}`);
+    console.log(`⏭️ Skipped (duplicates): ${totalSkipped}`);
+    console.log(`❌ Failed: ${totalFailed}`);
+    console.log('='.repeat(80) + '\n');
+
+    return {
+      success: true,
+      project_origin: projectOrigin,
+      total_processed: totalProcessed,
+      total_moved: totalMoved,
+      total_skipped: totalSkipped,
+      total_failed: totalFailed,
+      message: `Completed migration for ${projectOrigin}: ${totalMoved} moved, ${totalSkipped} skipped, ${totalFailed} failed`
+    };
   }
 }
 

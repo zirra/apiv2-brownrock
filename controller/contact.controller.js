@@ -609,6 +609,97 @@ class ContactController {
       })
     }
   }
+
+  /**
+   * POST /v1/postgres/contacts/move-to-ready
+   * Move non-duplicate contacts from contacts table to contactsready table
+   * Query params: limit, offset, job_id, project_origin
+   */
+  async moveContactsToReady(req, res) {
+    try {
+      const { limit, offset, job_id, project_origin } = req.query;
+
+      const options = {};
+      if (limit) options.limit = parseInt(limit);
+      if (offset) options.offset = parseInt(offset);
+      if (job_id) options.job_id = job_id;
+      if (project_origin) options.project_origin = project_origin;
+
+      const result = await this.postgresContactService.moveContactsToReady(options);
+
+      res.status(result.success ? 200 : 500).json(result);
+
+    } catch (error) {
+      console.error('Error moving contacts to ready:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to move contacts: ${error.message}`
+      });
+    }
+  }
+
+  /**
+   * POST /v1/postgres/contacts/move-job-to-ready/:job_id
+   * Move all contacts from a specific job to contactsready
+   */
+  async moveJobContactsToReady(req, res) {
+    try {
+      const { job_id } = req.params;
+
+      if (!job_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'job_id parameter is required'
+        });
+      }
+
+      const result = await this.postgresContactService.moveJobContactsToReady(job_id);
+
+      res.status(result.success ? 200 : 500).json(result);
+
+    } catch (error) {
+      console.error('Error moving job contacts to ready:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to move job contacts: ${error.message}`
+      });
+    }
+  }
+
+  /**
+   * POST /v1/postgres/contacts/move-project-to-ready/:project_origin
+   * Move all contacts from a specific project origin to contactsready
+   * Query params: batch_size (default: 1000)
+   */
+  async moveProjectContactsToReady(req, res) {
+    try {
+      const { project_origin } = req.params;
+      const { batch_size } = req.query;
+
+      if (!project_origin) {
+        return res.status(400).json({
+          success: false,
+          message: 'project_origin parameter is required'
+        });
+      }
+
+      const batchSize = batch_size ? parseInt(batch_size) : 1000;
+
+      const result = await this.postgresContactService.moveProjectContactsToReady(
+        project_origin,
+        batchSize
+      );
+
+      res.status(result.success ? 200 : 500).json(result);
+
+    } catch (error) {
+      console.error('Error moving project contacts to ready:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to move project contacts: ${error.message}`
+      });
+    }
+  }
 }
 
 // Create single instance
@@ -632,6 +723,11 @@ module.exports.controller = (app) => {
   app.post('/v1/postgres/contacts/deduplicate', (req, res) => contactController.deduplicatePostgresContacts(req, res))
   app.delete('/v1/postgres/contacts/:id', (req, res) => contactController.deletePostgresContact(req, res))
   app.post('/v1/postgres/contacts/bulk-delete', (req, res) => contactController.bulkDeletePostgresContacts(req, res))
+
+  // Contact migration endpoints (contacts -> contactsready)
+  app.post('/v1/postgres/contacts/move-to-ready', (req, res) => contactController.moveContactsToReady(req, res))
+  app.post('/v1/postgres/contacts/move-job-to-ready/:job_id', (req, res) => contactController.moveJobContactsToReady(req, res))
+  app.post('/v1/postgres/contacts/move-project-to-ready/:project_origin', (req, res) => contactController.moveProjectContactsToReady(req, res))
 
   // Debug endpoints
   app.get('/v1/test-dynamo', (req, res) => contactController.testDynamoClient(req, res))
