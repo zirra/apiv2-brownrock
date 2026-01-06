@@ -28,16 +28,22 @@ class JobRun extends Model {
         }
       },
       status: {
-        type: DataTypes.ENUM('pending', 'running', 'completed', 'failed'),
+        type: DataTypes.STRING(20),
         allowNull: false,
         defaultValue: 'pending',
-        comment: 'Current status of the job run'
+        comment: 'Current status of the job run',
+        validate: {
+          isIn: [['pending', 'running', 'completed', 'failed']]
+        }
       },
       trigger_type: {
-        type: DataTypes.ENUM('cron', 'manual', 'api'),
+        type: DataTypes.STRING(20),
         allowNull: false,
         defaultValue: 'cron',
-        comment: 'How the job was triggered'
+        comment: 'How the job was triggered',
+        validate: {
+          isIn: [['cron', 'manual', 'api']]
+        }
       },
       started_at: {
         type: DataTypes.DATE,
