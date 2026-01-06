@@ -883,6 +883,27 @@ class ContactController {
       });
     }
   }
+
+  /**
+   * Get distinct job IDs from contacts table with formatted labels
+   */
+  async getJobIds(req, res) {
+    try {
+      const result = await this.postgresContactService.getJobIds();
+
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(500).json(result);
+      }
+    } catch (error) {
+      console.error('Error fetching job IDs:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to fetch job IDs: ${error.message}`
+      });
+    }
+  }
 }
 
 // Create single instance
@@ -901,6 +922,7 @@ module.exports.controller = (app) => {
   // PostgreSQL contact management endpoints
   app.get('/v1/postgres/contacts', (req, res) => contactController.getPostgresContacts(req, res))
   app.get('/v1/postgres/contacts/stats', (req, res) => contactController.getPostgresContactStats(req, res))
+  app.get('/v1/postgres/contacts/jobids', (req, res) => contactController.getJobIds(req, res))
   app.get('/v1/postgres/contacts/export', (req, res) => contactController.exportPostgresContactsCSV(req, res))
   app.put('/v1/postgres/contacts/update', (req, res) => contactController.updatePostgresContactStatus(req, res))
   app.post('/v1/postgres/contacts/deduplicate', (req, res) => contactController.deduplicatePostgresContacts(req, res))

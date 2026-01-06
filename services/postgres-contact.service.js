@@ -1355,6 +1355,93 @@ class PostgresContactService {
   }
 
   /**
+   * Get distinct job IDs from contacts table with formatted labels
+   */
+  async getJobIds() {
+    try {
+      const { fn, col } = require('sequelize');
+
+      // Get distinct job IDs
+      const results = await this.Contact.findAll({
+        attributes: [
+          [fn('DISTINCT', col('jobid')), 'jobid']
+        ],
+        where: {
+          jobid: {
+            [this.sequelize.Sequelize.Op.ne]: null
+          }
+        },
+        order: [[col('jobid'), 'DESC']],
+        raw: true
+      });
+
+      // Format each job ID
+      const formattedJobs = results.map(row => {
+        const jobid = row.jobid;
+        const tarr = jobid.split('_');
+        let lstring;
+        let stamp;
+
+        if (tarr.length === 4) {
+          stamp = this.formatTimestamp(tarr[2]);
+          lstring = `${tarr[0]} ${tarr[1]} ${stamp}`;
+        } else {
+          stamp = this.formatTimestamp(tarr[1]);
+          lstring = `${tarr[0]} ${stamp}`;
+        }
+
+        return {
+          jobid: jobid,
+          label: lstring,
+          project: tarr[0],
+          subtype: tarr.length === 4 ? tarr[1] : null,
+          timestamp: tarr.length === 4 ? tarr[2] : tarr[1],
+          formatted_timestamp: stamp
+        };
+      });
+
+      return {
+        success: true,
+        jobs: formattedJobs,
+        total: formattedJobs.length
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Format timestamp from job ID (e.g., "20240115123045" -> "Jan 15, 2024 12:30 PM")
+   */
+  formatTimestamp(timestamp) {
+    if (!timestamp || timestamp.length !== 14) {
+      return timestamp;
+    }
+
+    try {
+      const year = timestamp.substring(0, 4);
+      const month = timestamp.substring(4, 6);
+      const day = timestamp.substring(6, 8);
+      const hour = parseInt(timestamp.substring(8, 10));
+      const minute = timestamp.substring(10, 12);
+
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                          'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+      const monthName = monthNames[parseInt(month) - 1];
+      const period = hour >= 12 ? 'PM' : 'AM';
+      const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+
+      return `${monthName} ${parseInt(day)}, ${year} ${displayHour}:${minute} ${period}`;
+    } catch (err) {
+      return timestamp;
+    }
+  }
+
+  /**
    * Get contactsready statistics
    */
   async getContactReadyStats() {
