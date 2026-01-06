@@ -1353,6 +1353,301 @@ class PostgresContactService {
       message: `Completed migration for ${projectOrigin}: ${totalMoved} moved, ${totalSkipped} skipped, ${totalFailed} failed`
     };
   }
+
+  /**
+   * Get contactsready statistics
+   */
+  async getContactReadyStats() {
+    try {
+      const [total, verified, legal, pending] = await Promise.all([
+        this.ContactReady.count(),
+        this.ContactReady.count({ where: { verified: true } }),
+        this.ContactReady.count({ where: { islegal: true } }),
+        this.ContactReady.count({ where: { verified: false } })
+      ]);
+
+      return {
+        success: true,
+        stats: {
+          total,
+          verified,
+          legal,
+          pending,
+          verification_rate: total > 0 ? Math.round((verified / total) * 100) : 0
+        }
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Search contactsready
+   */
+  async searchContactsReady(options = {}) {
+    try {
+      const {
+        limit = 25,
+        offset = 0,
+        name,
+        company,
+        verified,
+        islegal,
+        city,
+        state,
+        search,
+        requireFirstName = false,
+        requireLastName = false,
+        requireBothNames = false,
+        sortBy = 'created_at',
+        sortOrder = 'DESC'
+      } = options;
+
+      const where = {};
+
+      // Global search across multiple fields
+      if (search) {
+        const searchTerm = `%${search}%`;
+        where[this.sequelize.Sequelize.Op.or] = [
+          { name: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { first_name: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { last_name: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { llc_owner: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { phone1: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { email1: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { address: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { city: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { state: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { zip: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { notes: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { record_type: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { document_section: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { source_file: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } }
+        ];
+      }
+
+      if (name) where.name = { [this.sequelize.Sequelize.Op.iLike]: `%${name}%` };
+      if (company) where.llc_owner = { [this.sequelize.Sequelize.Op.iLike]: `%${company}%` };
+      if (verified !== undefined) where.verified = verified;
+      if (islegal !== undefined) where.islegal = islegal;
+      if (city) where.city = { [this.sequelize.Sequelize.Op.iLike]: `%${city}%` };
+      if (state) where.state = { [this.sequelize.Sequelize.Op.iLike]: `%${state}%` };
+
+      // Filter for non-null names
+      if (requireBothNames) {
+        where.first_name = { [this.sequelize.Sequelize.Op.ne]: null };
+        where.last_name = { [this.sequelize.Sequelize.Op.ne]: null };
+      } else {
+        if (requireFirstName) {
+          where.first_name = { [this.sequelize.Sequelize.Op.ne]: null };
+        }
+        if (requireLastName) {
+          where.last_name = { [this.sequelize.Sequelize.Op.ne]: null };
+        }
+      }
+
+      // Validate sortBy to prevent SQL injection
+      const allowedSortFields = [
+        'id', 'name', 'first_name', 'last_name', 'llc_owner',
+        'company', 'city', 'state', 'verified', 'islegal',
+        'created_at', 'updated_at'
+      ];
+
+      const sortField = allowedSortFields.includes(sortBy) ? sortBy : 'created_at';
+      const sortDirection = ['ASC', 'DESC'].includes(sortOrder.toUpperCase()) ? sortOrder.toUpperCase() : 'DESC';
+
+      const result = await this.ContactReady.findAndCountAll({
+        where,
+        limit,
+        offset,
+        order: [[sortField, sortDirection]]
+      });
+
+      return {
+        success: true,
+        contacts: result.rows,
+        total: result.count,
+        limit,
+        offset,
+        sortBy: sortField,
+        sortOrder: sortDirection
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Update contactsready status
+   */
+  async updateContactReadyStatus(id, updates) {
+    try {
+      const [updatedRowsCount] = await this.ContactReady.update(updates, {
+        where: { id }
+      });
+
+      if (updatedRowsCount === 0) {
+        return { success: false, error: 'Contact not found' };
+      }
+
+      const updatedContact = await this.ContactReady.findByPk(id);
+      return {
+        success: true,
+        contact: updatedContact
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Delete contact from contactsready
+   */
+  async deleteContactReady(id) {
+    try {
+      const deletedRowCount = await this.ContactReady.destroy({
+        where: { id }
+      });
+
+      if (deletedRowCount === 0) {
+        return { success: false, error: 'Contact not found' };
+      }
+
+      return {
+        success: true,
+        message: 'Contact deleted successfully'
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Get contactsready by ID
+   */
+  async getContactReadyById(id) {
+    try {
+      const contact = await this.ContactReady.findByPk(id);
+
+      if (!contact) {
+        return { success: false, error: 'Contact not found' };
+      }
+
+      return {
+        success: true,
+        contact
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Export contactsready to CSV format
+   */
+  async exportContactsReadyToCSV(options = {}) {
+    try {
+      const {
+        verified,
+        islegal,
+        city,
+        state,
+        search
+      } = options;
+
+      const where = {};
+
+      if (search) {
+        const searchTerm = `%${search}%`;
+        where[this.sequelize.Sequelize.Op.or] = [
+          { name: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { first_name: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { last_name: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { llc_owner: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { address: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } },
+          { city: { [this.sequelize.Sequelize.Op.iLike]: searchTerm } }
+        ];
+      }
+
+      if (verified !== undefined) where.verified = verified;
+      if (islegal !== undefined) where.islegal = islegal;
+      if (city) where.city = { [this.sequelize.Sequelize.Op.iLike]: `%${city}%` };
+      if (state) where.state = { [this.sequelize.Sequelize.Op.iLike]: `%${state}%` };
+
+      const contacts = await this.ContactReady.findAll({
+        where,
+        order: [['created_at', 'DESC']]
+      });
+
+      // Convert to CSV
+      const headers = [
+        'ID', 'Name', 'First Name', 'Last Name', 'Company',
+        'Phone1', 'Phone2', 'Email1', 'Email2',
+        'Address', 'City', 'State', 'ZIP', 'Unit',
+        'Record Type', 'Document Section', 'Source File',
+        'Project Origin', 'App Number', 'Order Number', 'Case Number',
+        'Verified', 'Is Legal', 'Created At'
+      ];
+
+      const csvRows = [headers.join(',')];
+
+      for (const contact of contacts) {
+        const row = [
+          contact.id,
+          this.escapeCSV(contact.name),
+          this.escapeCSV(contact.first_name),
+          this.escapeCSV(contact.last_name),
+          this.escapeCSV(contact.llc_owner),
+          this.escapeCSV(contact.phone1),
+          this.escapeCSV(contact.phone2),
+          this.escapeCSV(contact.email1),
+          this.escapeCSV(contact.email2),
+          this.escapeCSV(contact.address),
+          this.escapeCSV(contact.city),
+          this.escapeCSV(contact.state),
+          this.escapeCSV(contact.zip),
+          this.escapeCSV(contact.unit),
+          this.escapeCSV(contact.record_type),
+          this.escapeCSV(contact.document_section),
+          this.escapeCSV(contact.source_file),
+          this.escapeCSV(contact.project_origin),
+          this.escapeCSV(contact.app_number),
+          this.escapeCSV(contact.order_number),
+          this.escapeCSV(contact.case_number),
+          contact.verified,
+          contact.islegal,
+          contact.created_at
+        ];
+        csvRows.push(row.join(','));
+      }
+
+      return {
+        success: true,
+        csv: csvRows.join('\n'),
+        count: contacts.length
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
 }
 
 module.exports = PostgresContactService;

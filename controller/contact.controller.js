@@ -700,6 +700,189 @@ class ContactController {
       });
     }
   }
+
+  /**
+   * Get contactsready with pagination and filtering
+   */
+  async getContactsReady(req, res) {
+    try {
+      const {
+        limit = '25',
+        offset = '0',
+        name,
+        company,
+        verified,
+        islegal,
+        city,
+        state,
+        search,
+        requireFirstName,
+        requireLastName,
+        requireBothNames,
+        sortBy = 'created_at',
+        sortOrder = 'DESC'
+      } = req.query;
+
+      const result = await this.postgresContactService.searchContactsReady({
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        name,
+        company,
+        verified: verified !== undefined ? verified === 'true' : undefined,
+        islegal: islegal !== undefined ? islegal === 'true' : undefined,
+        city,
+        state,
+        search,
+        requireFirstName: requireFirstName === 'true',
+        requireLastName: requireLastName === 'true',
+        requireBothNames: requireBothNames === 'true',
+        sortBy,
+        sortOrder
+      });
+
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(500).json(result);
+      }
+    } catch (error) {
+      console.error('Error fetching contactsready:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to fetch contactsready: ${error.message}`
+      });
+    }
+  }
+
+  /**
+   * Get contactsready statistics
+   */
+  async getContactsReadyStats(req, res) {
+    try {
+      const result = await this.postgresContactService.getContactReadyStats();
+
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(500).json(result);
+      }
+    } catch (error) {
+      console.error('Error fetching contactsready stats:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to fetch contactsready stats: ${error.message}`
+      });
+    }
+  }
+
+  /**
+   * Export contactsready to CSV
+   */
+  async exportContactsReadyCSV(req, res) {
+    try {
+      const {
+        verified,
+        islegal,
+        city,
+        state,
+        search
+      } = req.query;
+
+      const result = await this.postgresContactService.exportContactsReadyToCSV({
+        verified: verified !== undefined ? verified === 'true' : undefined,
+        islegal: islegal !== undefined ? islegal === 'true' : undefined,
+        city,
+        state,
+        search
+      });
+
+      if (result.success) {
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=contactsready.csv');
+        res.send(result.csv);
+      } else {
+        res.status(500).json(result);
+      }
+    } catch (error) {
+      console.error('Error exporting contactsready to CSV:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to export contactsready: ${error.message}`
+      });
+    }
+  }
+
+  /**
+   * Get single contactsready by ID
+   */
+  async getContactReadyById(req, res) {
+    try {
+      const { id } = req.params;
+      const result = await this.postgresContactService.getContactReadyById(id);
+
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(404).json(result);
+      }
+    } catch (error) {
+      console.error('Error fetching contactready:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to fetch contactready: ${error.message}`
+      });
+    }
+  }
+
+  /**
+   * Update contactsready status (verified, islegal, etc.)
+   */
+  async updateContactReadyStatus(req, res) {
+    try {
+      const { id } = req.body;
+      const updates = {};
+
+      if (req.body.verified !== undefined) updates.verified = req.body.verified;
+      if (req.body.islegal !== undefined) updates.islegal = req.body.islegal;
+      if (req.body.notes !== undefined) updates.notes = req.body.notes;
+
+      const result = await this.postgresContactService.updateContactReadyStatus(id, updates);
+
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(404).json(result);
+      }
+    } catch (error) {
+      console.error('Error updating contactready:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to update contactready: ${error.message}`
+      });
+    }
+  }
+
+  /**
+   * Delete contact from contactsready
+   */
+  async deleteContactReady(req, res) {
+    try {
+      const { id } = req.params;
+      const result = await this.postgresContactService.deleteContactReady(id);
+
+      if (result.success) {
+        res.json(result);
+      } else {
+        res.status(404).json(result);
+      }
+    } catch (error) {
+      console.error('Error deleting contactready:', error.message);
+      res.status(500).json({
+        success: false,
+        message: `Failed to delete contactready: ${error.message}`
+      });
+    }
+  }
 }
 
 // Create single instance
@@ -728,6 +911,14 @@ module.exports.controller = (app) => {
   app.post('/v1/postgres/contacts/move-to-ready', (req, res) => contactController.moveContactsToReady(req, res))
   app.post('/v1/postgres/contacts/move-job-to-ready/:job_id', (req, res) => contactController.moveJobContactsToReady(req, res))
   app.post('/v1/postgres/contacts/move-project-to-ready/:project_origin', (req, res) => contactController.moveProjectContactsToReady(req, res))
+
+  // ContactsReady query endpoints
+  app.get('/v1/postgres/contactsready', (req, res) => contactController.getContactsReady(req, res))
+  app.get('/v1/postgres/contactsready/stats', (req, res) => contactController.getContactsReadyStats(req, res))
+  app.get('/v1/postgres/contactsready/export', (req, res) => contactController.exportContactsReadyCSV(req, res))
+  app.get('/v1/postgres/contactsready/:id', (req, res) => contactController.getContactReadyById(req, res))
+  app.put('/v1/postgres/contactsready/update', (req, res) => contactController.updateContactReadyStatus(req, res))
+  app.delete('/v1/postgres/contactsready/:id', (req, res) => contactController.deleteContactReady(req, res))
 
   // Debug endpoints
   app.get('/v1/test-dynamo', (req, res) => contactController.testDynamoClient(req, res))
